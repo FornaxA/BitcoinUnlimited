@@ -12,7 +12,7 @@
 #include "init.h"
 #include "main.h"
 #include "miner.h"
-#include "net.h"
+#include "netbase.h"
 #include "policy/policy.h"
 #include "qt/guiconstants.h"
 #include "requestManager.h"
@@ -473,6 +473,7 @@ static void addDebuggingOptions(AllowedArgs &allowedArgs, HelpMessageMode mode)
         .addDebugArg("testsafemode", optionalBool, strprintf("Force safe mode (default: %u)", DEFAULT_TESTSAFEMODE))
         .addDebugArg("dropmessagestest=<n>", requiredInt, "Randomly drop 1 of every <n> network messages")
         .addDebugArg("fuzzmessagestest=<n>", requiredInt, "Randomly fuzz 1 of every <n> network messages")
+        .addDebugArg("pvtest", optionalBool, strprintf("Slow down input checking to 1 every second (default: %u)", DEFAULT_PV_TESTMODE))
 #ifdef ENABLE_WALLET
         .addDebugArg("flushwallet", optionalBool,
             strprintf("Run a thread to flush wallet periodically (default: %u)", DEFAULT_FLUSHWALLET))
@@ -662,6 +663,10 @@ static void addTweaks(AllowedArgs &allowedArgs, CTweakMap *pTweaks)
 
         if (dynamic_cast<CTweak<CAmount> *>(tweak))
             allowedArgs.addArg(optName + "=<amt>", requiredAmount, tweak->GetHelp());
+        else if (dynamic_cast<CTweakRef<CAmount> *>(tweak))
+            allowedArgs.addArg(optName + "=<amt>", requiredAmount, tweak->GetHelp());
+        else if (dynamic_cast<CTweak<std::string> *>(tweak))
+            allowedArgs.addArg(optName + "=<str>", requiredStr, tweak->GetHelp());
         else if (dynamic_cast<CTweakRef<std::string> *>(tweak))
             allowedArgs.addArg(optName + "=<str>", requiredStr, tweak->GetHelp());
         else

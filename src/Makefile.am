@@ -183,6 +183,7 @@ libbitcoin_server_a_SOURCES = \
   banentry.cpp \
   bitnodes.cpp \
   bloom.cpp \
+  buip055fork.cpp \
   chain.cpp \
   checkpoints.cpp \
   connmgr.cpp \

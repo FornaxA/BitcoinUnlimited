@@ -18,7 +18,6 @@
 
 #include <boost/thread.hpp>
 
-extern CCriticalSection cs_blockvalidationthread;
 
 /**
  * Closure representing one script verification
@@ -26,7 +25,7 @@ extern CCriticalSection cs_blockvalidationthread;
  */
 class CScriptCheck
 {
-private:
+protected:
     ValidationResourceTracker *resourceTracker;
     CScript scriptPubKey;
     const CTransaction *ptxTo;
@@ -34,10 +33,12 @@ private:
     unsigned int nFlags;
     bool cacheStore;
     ScriptError error;
+    CAmount amount;
 
 public:
     CScriptCheck()
-        : resourceTracker(NULL), ptxTo(0), nIn(0), nFlags(0), cacheStore(false), error(SCRIPT_ERR_UNKNOWN_ERROR)
+        : resourceTracker(NULL), ptxTo(0), nIn(0), nFlags(0), cacheStore(false), error(SCRIPT_ERR_UNKNOWN_ERROR),
+          amount(0)
     {
     }
     CScriptCheck(ValidationResourceTracker *resourceTrackerIn,
@@ -49,6 +50,7 @@ public:
         : resourceTracker(resourceTrackerIn), scriptPubKey(txFromIn.vout[txToIn.vin[nInIn].prevout.n].scriptPubKey),
           ptxTo(&txToIn), nIn(nInIn), nFlags(nFlagsIn), cacheStore(cacheIn), error(SCRIPT_ERR_UNKNOWN_ERROR)
     {
+        amount = txFromIn.vout[txToIn.vin[nInIn].prevout.n].nValue;
     }
 
     bool operator()();
@@ -62,9 +64,29 @@ public:
         std::swap(nFlags, check.nFlags);
         std::swap(cacheStore, check.cacheStore);
         std::swap(error, check.error);
+        std::swap(amount, check.amount);
     }
 
     ScriptError GetScriptError() const { return error; }
+};
+
+class CScriptCheckAndAnalyze : public CScriptCheck
+{
+    CTransaction *ptxToNonConst;
+
+public:
+    CScriptCheckAndAnalyze() : CScriptCheck(), ptxToNonConst(0) {}
+    CScriptCheckAndAnalyze(ValidationResourceTracker *resourceTrackerIn,
+        const CCoins &txFromIn,
+        CTransaction &txToIn,
+        unsigned int nInIn,
+        unsigned int nFlagsIn,
+        bool cacheIn)
+        : CScriptCheck(resourceTrackerIn, txFromIn, txToIn, nInIn, nFlagsIn, cacheIn), ptxToNonConst(&txToIn)
+    {
+    }
+
+    bool operator()();
 };
 
 class CParallelValidation
@@ -84,7 +106,8 @@ private:
         CCheckQueue<CScriptCheck> *pScriptQueue;
         uint256 hash;
         uint256 hashPrevBlock;
-        uint32_t nChainWork;
+        uint32_t nChainWork; // chain work for this block.
+        uint32_t nMostWorkOurFork; // most work for the chain we are on.
         uint32_t nSequenceId;
         int64_t nStartTime;
         uint64_t nBlockSize;
@@ -150,6 +173,12 @@ public:
     /* Is there a re-org in progress */
     void IsReorgInProgress(const boost::thread::id this_id, const bool fReorg, const bool fParallel);
     bool IsReorgInProgress();
+
+    /* Update the nMostWorkOurFork when a new header arrives */
+    void UpdateMostWorkOurFork(const CBlockHeader &header);
+
+    /* Update the nMostWorkOurFork when a new header arrives */
+    uint32_t MaxWorkChainBeingProcessed();
 
     /* Clear orphans from the orphan cache that are no longer needed*/
     void ClearOrphanCache(const CBlock &block);

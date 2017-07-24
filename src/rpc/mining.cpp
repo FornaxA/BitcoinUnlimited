@@ -141,8 +141,8 @@ UniValue generateBlocks(boost::shared_ptr<CReserveScript> coinbaseScript, int nG
 
         // In we are mining our own block or not running in parallel for any reason
         // we must terminate any block validation threads that are currently running,
-        // Unless they have more work than our own block.
-        // TODO: we need a better way to determine if a reorg is in progress.
+        // Unless they have more work than our own block or are processing a chain
+        // that has more work than our block.
         PV->StopAllValidationThreads(pblock->GetBlockHeader().nBits);
 
         CValidationState state;
@@ -470,11 +470,14 @@ UniValue getblocktemplate(const UniValue& params, bool fHelp)
     if (strMode != "template")
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid mode");
 
-    if (vNodes.empty())
-        throw JSONRPCError(RPC_CLIENT_NOT_CONNECTED, "Bitcoin is not connected!");
+    if (!unsafeGetBlockTemplate.value)
+    {
+        if (vNodes.empty())
+            throw JSONRPCError(RPC_CLIENT_NOT_CONNECTED, "Bitcoin is not connected!");
 
-    if (IsInitialBlockDownload())
-        throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD, "Bitcoin is downloading blocks...");
+        if (IsInitialBlockDownload())
+            throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD, "Bitcoin is downloading blocks...");
+    }
 
     static unsigned int nTransactionsUpdatedLast;
 
@@ -751,8 +754,8 @@ UniValue submitblock(const UniValue& params, bool fHelp)
 
     // In we are mining our own block or not running in parallel for any reason
     // we must terminate any block validation threads that are currently running,
-    // Unless they have more work than our own block.
-    // TODO: we need a better way to determine if a reorg is in progress.
+    // Unless they have more work than our own block or are processing a chain
+    // that has more work than our block.
     PV->StopAllValidationThreads(block.GetBlockHeader().nBits);
 
     bool fAccepted = ProcessNewBlock(state, Params(), NULL, &block, true, NULL, false);
