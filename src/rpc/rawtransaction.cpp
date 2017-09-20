@@ -563,6 +563,7 @@ UniValue signrawtransaction(const UniValue& params, bool fHelp)
             "         \"vout\":n,                  (numeric, required) The output number\n"
             "         \"scriptPubKey\": \"hex\",   (string, required) script key\n"
             "         \"redeemScript\": \"hex\"    (string, required for P2SH) redeem script\n"
+            "         \"amount\": value            (numeric, required) The amount spent\n"
             "       }\n"
             "       ,...\n"
             "    ]\n"
@@ -575,7 +576,7 @@ UniValue signrawtransaction(const UniValue& params, bool fHelp)
             "       \"ALL\"\n"
             "       \"NONE\"\n"
             "       \"SINGLE\"\n"
-            "       followed by ANYONECANPAY and/or FORKID flags separated with |, for example\n"
+            "       followed by ANYONECANPAY and/or FORKID/NOFORKID flags separated with |, for example\n"
             "       \"ALL|ANYONECANPAY|FORKID\"\n"
             "       \"NONE|FORKID\"\n"
             "       \"SINGLE|ANYONECANPAY\"\n"
@@ -701,7 +702,23 @@ UniValue signrawtransaction(const UniValue& params, bool fHelp)
                 if ((unsigned int)nOut >= coins->vout.size())
                     coins->vout.resize(nOut+1);
                 coins->vout[nOut].scriptPubKey = scriptPubKey;
-                coins->vout[nOut].nValue = 0; // we don't know the actual output value
+                if (prevOut.exists("amount")) // From bitcoin-abc
+                {
+                    coins->vout[nOut].nValue = AmountFromValue(find_value(prevOut, "amount"));
+                    if (!MoneyRange(coins->vout[nOut].nValue))
+                    {
+                        // 'amount' param is not a valid money range, so error
+                        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("amount on prevtx #%d, vout %d out of range", int(idx), nOut));
+                    }
+                }
+                else
+                {
+#ifdef BITCOIN_CASH
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Missing amount");
+#else
+                    coins->vout[nOut].nValue = 0; // we don't know the actual output value
+#endif
+                }
             }
 
             // if redeemScript given and not using the local wallet (private keys
@@ -725,6 +742,7 @@ UniValue signrawtransaction(const UniValue& params, bool fHelp)
 #endif
 
     int nHashType = SIGHASH_ALL;
+    bool pickedForkId=false;
     if (params.size() > 3 && !params[3].isNull())
     {
         std::string strHashType = params[3].get_str();
@@ -744,7 +762,15 @@ UniValue signrawtransaction(const UniValue& params, bool fHelp)
             else if (boost::iequals(s,"ANYONECANPAY"))
                 nHashType |= SIGHASH_ANYONECANPAY;
             else if (boost::iequals(s,"FORKID"))
+            {
+                pickedForkId=true;
                 nHashType |= SIGHASH_FORKID;
+            }
+            else if (boost::iequals(s,"NOFORKID"))
+            {
+                pickedForkId=true;
+                nHashType &= ~SIGHASH_FORKID;
+            }
             else
             {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid sighash param");
@@ -752,9 +778,13 @@ UniValue signrawtransaction(const UniValue& params, bool fHelp)
         }
 
     }
-    else  // If the user didn't specify, use the configured default for the hash type
+    if (!pickedForkId)  // If the user didn't specify, use the configured default for the hash type
     {
-        // if (chainActive.Tip()->IsforkActiveOnNextBlock(miningForkTime.value)) nHashType |= SIGHASH_FORKID;
+        if (chainActive.Tip()->IsforkActiveOnNextBlock(miningForkTime.value))
+        {
+            nHashType |= SIGHASH_FORKID;
+            pickedForkId = true;
+        }
     }
 
     bool fHashSingle = ((nHashType & ~(SIGHASH_ANYONECANPAY | SIGHASH_FORKID)) == SIGHASH_SINGLE);
@@ -781,13 +811,27 @@ UniValue signrawtransaction(const UniValue& params, bool fHelp)
             SignSignature(keystore, prevPubKey, mergedTx, i, amount, nHashType);
 
         // ... and merge in other signatures:
-        BOOST_FOREACH(const CMutableTransaction& txv, txVariants) {
-            txin.scriptSig = CombineSignatures(prevPubKey, TransactionSignatureChecker(&txConst, i, amount), txin.scriptSig, txv.vin[i].scriptSig);
+        if (pickedForkId)
+        {
+            BOOST_FOREACH(const CMutableTransaction& txv, txVariants) {
+                txin.scriptSig = CombineSignatures(prevPubKey, TransactionSignatureChecker(&txConst, i, amount, SCRIPT_ENABLE_SIGHASH_FORKID), txin.scriptSig, txv.vin[i].scriptSig);
+            }
+            ScriptError serror = SCRIPT_ERR_OK;
+            if (!VerifyScript(txin.scriptSig, prevPubKey, STANDARD_SCRIPT_VERIFY_FLAGS | SCRIPT_ENABLE_SIGHASH_FORKID, MutableTransactionSignatureChecker(&mergedTx, i, amount, SCRIPT_ENABLE_SIGHASH_FORKID), &serror)) {
+                TxInErrorToJSON(txin, vErrors, ScriptErrorString(serror));
+            }
         }
-        ScriptError serror = SCRIPT_ERR_OK;
-        if (!VerifyScript(txin.scriptSig, prevPubKey, STANDARD_SCRIPT_VERIFY_FLAGS | SCRIPT_ENABLE_SIGHASH_FORKID, MutableTransactionSignatureChecker(&mergedTx, i, amount), &serror)) {
-            TxInErrorToJSON(txin, vErrors, ScriptErrorString(serror));
+        else
+        {
+            BOOST_FOREACH(const CMutableTransaction& txv, txVariants) {
+                txin.scriptSig = CombineSignatures(prevPubKey, TransactionSignatureChecker(&txConst, i, amount, 0), txin.scriptSig, txv.vin[i].scriptSig);
+            }
+            ScriptError serror = SCRIPT_ERR_OK;
+            if (!VerifyScript(txin.scriptSig, prevPubKey, STANDARD_SCRIPT_VERIFY_FLAGS, MutableTransactionSignatureChecker(&mergedTx, i, amount, 0), &serror)) {
+                TxInErrorToJSON(txin, vErrors, ScriptErrorString(serror));
+            }
         }
+
     }
     bool fComplete = vErrors.empty();
 
