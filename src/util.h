@@ -158,8 +158,10 @@ enum
     ZMQ = 0x2000000,
     QT = 0x4000000,
     IBD = 0x8000000,
+
     GRAPHENE = 0x10000000,
-    RESPEND = 0x20000000
+    RESPEND = 0x20000000,
+    WB = 0x40000000 // weak blocks
 };
 
 // Add corresponding lower case string for the category:
@@ -171,7 +173,7 @@ enum
             {MEMPOOLREJ, "mempoolrej"}, {BLK, "blk"}, {EVICT, "evict"}, {PARALLEL, "parallel"}, {RAND, "rand"}, \
             {REQ, "req"}, {BLOOM, "bloom"}, {LCK, "lck"}, {PROXY, "proxy"}, {DBASE, "dbase"},                   \
             {SELECTCOINS, "selectcoins"}, {ESTIMATEFEE, "estimatefee"}, {QT, "qt"}, {IBD, "ibd"},               \
-            {GRAPHENE, "graphene"}, {RESPEND, "respend"},                                                       \
+            {GRAPHENE, "graphene"}, {RESPEND, "respend"}, {WB, "weakblocks"},                                   \
         {                                                                                                       \
             ZMQ, "zmq"                                                                                          \
         }                                                                                                       \
@@ -442,9 +444,8 @@ bool SoftSetArg(const std::string &strArg, const std::string &strValue);
 bool SoftSetBoolArg(const std::string &strArg, bool fValue);
 
 /**
- * Return the number of physical cores available on the current system.
- * @note This does not count virtual cores, such as those provided by HyperThreading
- * when boost is newer than 1.56.
+ * Return the number of cores available on the current system.
+ * @note This does count virtual cores, such as those provided by HyperThreading.
  */
 int GetNumCores();
 
@@ -489,5 +490,14 @@ The first argument (the pattern) might contain '?' and '*' wildcards and
 the second argument will be matched to this pattern. Returns true iff the string
 matches pattern. */
 bool wildmatch(std::string pattern, std::string test);
+
+/**
+ * On platforms that support it, tell the kernel the calling thread is
+ * CPU-intensive and non-interactive. See SCHED_BATCH in sched(7) for details.
+ *
+ * @return The return value of sched_setschedule(), or 1 on systems without
+ * sched_setchedule().
+ */
+int ScheduleBatchPriority(void);
 
 #endif // BITCOIN_UTIL_H
