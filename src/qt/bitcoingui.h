@@ -1,5 +1,5 @@
 // Copyright (c) 2011-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -31,6 +31,7 @@ class WalletFrame;
 class WalletModel;
 class HelpMessageDialog;
 
+class Config;
 class CWallet;
 
 QT_BEGIN_NAMESPACE
@@ -51,7 +52,10 @@ class BitcoinGUI : public QMainWindow
 public:
     static const QString DEFAULT_WALLET;
 
-    explicit BitcoinGUI(const PlatformStyle *platformStyle, const NetworkStyle *networkStyle, QWidget *parent = 0);
+    explicit BitcoinGUI(const Config *,
+        const PlatformStyle *platformStyle,
+        const NetworkStyle *networkStyle,
+        QWidget *parent = 0);
     ~BitcoinGUI();
 
     /** Set the client model.
@@ -84,7 +88,8 @@ private:
     WalletFrame *walletFrame;
 
     UnitDisplayStatusBarControl *unitDisplayControl;
-    QLabel *labelEncryptionIcon;
+    QLabel *labelWalletEncryptionIcon;
+    QLabel *labelWalletHDStatusIcon;
     QLabel *labelConnectionsIcon;
     QLabel *labelBlocksIcon;
     QLabel *progressBarLabel;
@@ -126,6 +131,7 @@ private:
     int spinnerFrame;
 
     const PlatformStyle *platformStyle;
+    const Config *cfg;
 
     /** Create the main UI actions. */
     void createActions();
@@ -173,6 +179,12 @@ public Q_SLOTS:
     void setEncryptionStatus(int status);
 
     bool handlePaymentRequest(const SendCoinsRecipient &recipient);
+
+    /** Set the hd-enabled status as shown in the UI.
+     @param[in] status            current hd enabled status
+     @see WalletModel::EncryptionStatus
+     */
+    void setHDStatus(int hdEnabled);
 
     /** Show incoming transaction notification for new transactions. */
     void incomingTransaction(const QString &date,

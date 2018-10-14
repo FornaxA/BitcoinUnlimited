@@ -1,8 +1,12 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+// must include first to ensure FD_SETSIZE is correctly set
+// otherwise the default of 64 may be used on Windows
+#include "compat.h"
 
 #include "netbase.h"
 
@@ -10,6 +14,8 @@
 #include "sync.h"
 #include "util.h"
 #include "utilstrencodings.h"
+
+#include <atomic>
 
 #ifdef HAVE_GETADDRINFO_A
 #include <netdb.h>
@@ -24,7 +30,6 @@
 
 #include <boost/algorithm/string/case_conv.hpp> // for to_lower()
 #include <boost/algorithm/string/predicate.hpp> // for startswith() and endswith()
-#include <boost/thread.hpp>
 
 #if !defined(HAVE_MSG_NOSIGNAL) && !defined(MSG_NOSIGNAL)
 #define MSG_NOSIGNAL 0
@@ -346,7 +351,7 @@ std::string Socks5ErrorString(int err)
 /** Connect using SOCKS5 (as described in RFC1928) */
 static bool Socks5(const std::string &strDest, int port, const ProxyCredentials *auth, SOCKET &hSocket)
 {
-    LogPrint("net", "SOCKS5 connecting %s\n", strDest);
+    LOG(NET, "SOCKS5 connecting %s\n", strDest);
     if (strDest.size() > 255)
     {
         CloseSocket(hSocket);
@@ -376,7 +381,7 @@ static bool Socks5(const std::string &strDest, int port, const ProxyCredentials 
     if (!InterruptibleRecv(pchRet1, 2, SOCKS5_RECV_TIMEOUT, hSocket))
     {
         CloseSocket(hSocket);
-        LogPrintf("Socks5() connect to %s:%d failed: InterruptibleRecv() timeout or other failure\n", strDest, port);
+        LOGA("Socks5() connect to %s:%d failed: InterruptibleRecv() timeout or other failure\n", strDest, port);
         return false;
     }
     if (pchRet1[0] != 0x05)
@@ -404,7 +409,7 @@ static bool Socks5(const std::string &strDest, int port, const ProxyCredentials 
             CloseSocket(hSocket);
             return error("Error sending authentication to proxy");
         }
-        LogPrint("proxy", "SOCKS5 sending proxy authentication %s:%s\n", auth->username, auth->password);
+        LOG(PROXY, "SOCKS5 sending proxy authentication %s:%s\n", auth->username, auth->password);
         char pchRetA[2];
         if (!InterruptibleRecv(pchRetA, 2, SOCKS5_RECV_TIMEOUT, hSocket))
         {
@@ -456,7 +461,7 @@ static bool Socks5(const std::string &strDest, int port, const ProxyCredentials 
     {
         // Failures to connect to a peer that are not proxy errors
         CloseSocket(hSocket);
-        LogPrintf("Socks5() connect to %s:%d failed: %s\n", strDest, port, Socks5ErrorString(pchRet2[1]));
+        LOGA("Socks5() connect to %s:%d failed: %s\n", strDest, port, Socks5ErrorString(pchRet2[1]));
         return false;
     }
     if (pchRet2[2] != 0x00)
@@ -499,7 +504,7 @@ static bool Socks5(const std::string &strDest, int port, const ProxyCredentials 
         CloseSocket(hSocket);
         return error("Error reading from proxy");
     }
-    LogPrint("net", "SOCKS5 connected %s\n", strDest);
+    LOG(NET, "SOCKS5 connected %s\n", strDest);
     return true;
 }
 
@@ -511,7 +516,7 @@ bool static ConnectSocketDirectly(const CService &addrConnect, SOCKET &hSocketRe
     socklen_t len = sizeof(sockaddr);
     if (!addrConnect.GetSockAddr((struct sockaddr *)&sockaddr, &len))
     {
-        LogPrintf("Cannot connect to %s: unsupported network\n", addrConnect.ToString());
+        LOGA("Cannot connect to %s: unsupported network\n", addrConnect.ToString());
         return false;
     }
 
@@ -550,14 +555,13 @@ bool static ConnectSocketDirectly(const CService &addrConnect, SOCKET &hSocketRe
             int nRet = select(hSocket + 1, NULL, &fdset, NULL, &timeout);
             if (nRet == 0)
             {
-                LogPrint("net", "connection to %s timeout\n", addrConnect.ToString());
+                LOG(NET, "connection to %s timeout\n", addrConnect.ToString());
                 CloseSocket(hSocket);
                 return false;
             }
             if (nRet == SOCKET_ERROR)
             {
-                LogPrintf(
-                    "select() for %s failed: %s\n", addrConnect.ToString(), NetworkErrorString(WSAGetLastError()));
+                LOGA("select() for %s failed: %s\n", addrConnect.ToString(), NetworkErrorString(WSAGetLastError()));
                 CloseSocket(hSocket);
                 return false;
             }
@@ -568,15 +572,13 @@ bool static ConnectSocketDirectly(const CService &addrConnect, SOCKET &hSocketRe
             if (getsockopt(hSocket, SOL_SOCKET, SO_ERROR, &nRet, &nRetSize) == SOCKET_ERROR)
 #endif
             {
-                LogPrintf(
-                    "getsockopt() for %s failed: %s\n", addrConnect.ToString(), NetworkErrorString(WSAGetLastError()));
+                LOGA("getsockopt() for %s failed: %s\n", addrConnect.ToString(), NetworkErrorString(WSAGetLastError()));
                 CloseSocket(hSocket);
                 return false;
             }
             if (nRet != 0)
             {
-                LogPrintf(
-                    "connect() to %s failed after select(): %s\n", addrConnect.ToString(), NetworkErrorString(nRet));
+                LOGA("connect() to %s failed after select(): %s\n", addrConnect.ToString(), NetworkErrorString(nRet));
                 CloseSocket(hSocket);
                 return false;
             }
@@ -587,7 +589,7 @@ bool static ConnectSocketDirectly(const CService &addrConnect, SOCKET &hSocketRe
         else
 #endif
         {
-            LogPrintf("connect() to %s failed: %s\n", addrConnect.ToString(), NetworkErrorString(WSAGetLastError()));
+            LOGA("connect() to %s failed: %s\n", addrConnect.ToString(), NetworkErrorString(WSAGetLastError()));
             CloseSocket(hSocket);
             return false;
         }
@@ -670,9 +672,10 @@ static bool ConnectThroughProxy(const proxyType &proxy,
     // do socks negotiation
     if (proxy.randomize_credentials)
     {
+        FastRandomContext insecure_rand;
         ProxyCredentials random_auth;
-        random_auth.username = strprintf("%i", insecure_rand());
-        random_auth.password = strprintf("%i", insecure_rand());
+        static std::atomic_int counter = {(int)insecure_rand.rand32()};
+        random_auth.username = random_auth.password = strprintf("%i", counter++);
         if (!Socks5(strDest, (unsigned short)port, &random_auth, hSocket))
             return false;
     }
@@ -714,8 +717,8 @@ bool ConnectSocketByName(CService &addr,
 
     SplitHostPort(std::string(pszDest), port, strDest);
 
-    proxyType nameProxy;
-    GetNameProxy(nameProxy);
+    proxyType _nameProxy;
+    GetNameProxy(_nameProxy);
 
     CService addrResolved;
     if (Lookup(strDest.c_str(), addrResolved, port, fNameLookup && !HaveNameProxy()))
@@ -731,7 +734,7 @@ bool ConnectSocketByName(CService &addr,
 
     if (!HaveNameProxy())
         return false;
-    return ConnectThroughProxy(nameProxy, strDest, port, hSocketRet, nTimeout, outProxyConnectionFailed);
+    return ConnectThroughProxy(_nameProxy, strDest, port, hSocketRet, nTimeout, outProxyConnectionFailed);
 }
 
 #ifdef WIN32
@@ -753,7 +756,7 @@ std::string NetworkErrorString(int err)
 std::string NetworkErrorString(int err)
 {
     char buf[256];
-    const char *s = buf;
+    const char *s = nullptr;
     buf[0] = 0;
 /* Too bad there are two incompatible implementations of the
  * thread-safe strerror. */
@@ -762,6 +765,7 @@ std::string NetworkErrorString(int err)
 #else /* POSIX variant always returns message in buffer */
     if (strerror_r(err, buf, sizeof(buf)))
         buf[0] = 0;
+    s = buf;
 #endif
     return strprintf("%s (%d)", s, err);
 }
@@ -776,6 +780,10 @@ bool CloseSocket(SOCKET &hSocket)
 #else
     int ret = close(hSocket);
 #endif
+    if (ret)
+    {
+        LOG(NET, "Socket close failed: %d. Error: %s\n", hSocket, NetworkErrorString(WSAGetLastError()));
+    }
     hSocket = INVALID_SOCKET;
     return ret != SOCKET_ERROR;
 }

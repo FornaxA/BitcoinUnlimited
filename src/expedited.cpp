@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -23,7 +23,7 @@ bool CheckAndRequestExpeditedBlocks(CNode *pfrom)
 {
     if (pfrom->nVersion >= EXPEDITED_VERSION)
     {
-        BOOST_FOREACH (std::string &strAddr, mapMultiArgs["-expeditedblock"])
+        for (std::string &strAddr : mapMultiArgs["-expeditedblock"])
         {
             std::string strListeningPeerIP;
             std::string strPeerIP = pfrom->addr.ToString();
@@ -79,8 +79,10 @@ bool HandleExpeditedRequest(CDataStream &vRecv, CNode *pfrom)
     return true;
 }
 
-bool IsRecentlyExpeditedAndStore(const uint256 &hash)
+static inline bool IsRecentlyExpeditedAndStore(const uint256 &hash)
 {
+    AssertLockHeld(connmgr->cs_expedited);
+
     for (int i = 0; i < NUM_XPEDITED_STORE; i++)
         if (xpeditedBlkSent[i] == hash)
             return true;
@@ -113,11 +115,11 @@ bool HandleExpeditedBlock(CDataStream &vRecv, CNode *pfrom)
     }
 }
 
-void SendExpeditedBlock(CXThinBlock &thinBlock, unsigned char hops, const CNode *skip)
+void ActuallySendExpreditedBlock(CXThinBlock &thinBlock, unsigned char hops, const CNode *skip)
 {
     VNodeRefs vNodeRefs(connmgr->ExpeditedBlockNodes());
 
-    BOOST_FOREACH (CNodeRef &nodeRef, vNodeRefs)
+    for (CNodeRef &nodeRef : vNodeRefs)
     {
         CNode *n = nodeRef.get();
 
@@ -127,8 +129,7 @@ void SendExpeditedBlock(CXThinBlock &thinBlock, unsigned char hops, const CNode 
         }
         else if (n != skip) // Don't send back to the sending node to avoid looping
         {
-            LogPrint(
-                "thin", "Sending expedited block %s to %s\n", thinBlock.header.GetHash().ToString(), n->GetLogName());
+            LOG(THIN, "Sending expedited block %s to %s\n", thinBlock.header.GetHash().ToString(), n->GetLogName());
 
             n->PushMessage(NetMsgType::XPEDITEDBLK, (unsigned char)EXPEDITED_MSG_XTHIN, hops, thinBlock);
             n->blocksSent += 1;
@@ -136,12 +137,22 @@ void SendExpeditedBlock(CXThinBlock &thinBlock, unsigned char hops, const CNode 
     }
 }
 
+void SendExpeditedBlock(CXThinBlock &thinBlock, unsigned char hops, const CNode *skip)
+{
+    LOCK(connmgr->cs_expedited);
+    if (!IsRecentlyExpeditedAndStore(thinBlock.header.GetHash()))
+    {
+        ActuallySendExpreditedBlock(thinBlock, hops, skip);
+    }
+}
+
 void SendExpeditedBlock(const CBlock &block, const CNode *skip)
 {
+    LOCK(connmgr->cs_expedited);
     if (!IsRecentlyExpeditedAndStore(block.GetHash()))
     {
         CXThinBlock thinBlock(block);
-        SendExpeditedBlock(thinBlock, 0, skip);
+        ActuallySendExpreditedBlock(thinBlock, 0, skip);
     }
     // else, nothing to do
 }

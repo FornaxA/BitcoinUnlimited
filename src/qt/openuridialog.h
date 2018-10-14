@@ -1,5 +1,5 @@
 // Copyright (c) 2011-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -7,6 +7,8 @@
 #define BITCOIN_QT_OPENURIDIALOG_H
 
 #include <QDialog>
+
+class Config;
 
 namespace Ui
 {
@@ -18,7 +20,7 @@ class OpenURIDialog : public QDialog
     Q_OBJECT
 
 public:
-    explicit OpenURIDialog(QWidget *parent);
+    explicit OpenURIDialog(const Config *cfg, QWidget *parent);
     ~OpenURIDialog();
 
     QString getURI();
@@ -31,6 +33,7 @@ private Q_SLOTS:
 
 private:
     Ui::OpenURIDialog *ui;
+    const Config *cfg;
 };
 
 #endif // BITCOIN_QT_OPENURIDIALOG_H

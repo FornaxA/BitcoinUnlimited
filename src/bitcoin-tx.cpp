@@ -7,10 +7,12 @@
 #endif
 
 #include "base58.h"
+#include "chainparams.h"
 #include "clientversion.h"
 #include "coins.h"
 #include "consensus/consensus.h"
 #include "core_io.h"
+#include "dstencode.h"
 #include "keystore.h"
 #include "policy/policy.h"
 #include "primitives/transaction.h"
@@ -191,6 +193,15 @@ static void RegisterLoad(const string &strInput)
     RegisterSetJson(key, valStr);
 }
 
+static CAmount ExtractAndValidateValue(const std::string &strValue)
+{
+    CAmount value;
+    if (!ParseMoney(strValue, value))
+        throw runtime_error("Invalid TX output value");
+
+    return value;
+}
+
 static void MutateTxVersion(CMutableTransaction &tx, const string &cmdVal)
 {
     int64_t newVersion = atoi64(cmdVal);
@@ -211,13 +222,15 @@ static void MutateTxLocktime(CMutableTransaction &tx, const string &cmdVal)
 
 static void MutateTxAddInput(CMutableTransaction &tx, const string &strInput)
 {
+    std::vector<std::string> vStrInputParts;
+    boost::split(vStrInputParts, strInput, boost::is_any_of(":"));
+
     // separate TXID:VOUT in string
-    size_t pos = strInput.find(':');
-    if ((pos == string::npos) || (pos == 0) || (pos == (strInput.size() - 1)))
+    if (vStrInputParts.size() < 2)
         throw runtime_error("TX input missing separator");
 
     // extract and validate TXID
-    string strTxid = strInput.substr(0, pos);
+    string strTxid = vStrInputParts[0];
     if ((strTxid.size() != 64) || !IsHex(strTxid))
         throw runtime_error("invalid TX input txid");
     uint256 txid(uint256S(strTxid));
@@ -226,46 +239,50 @@ static void MutateTxAddInput(CMutableTransaction &tx, const string &strInput)
     static const unsigned int maxVout = BLOCKSTREAM_CORE_MAX_BLOCK_SIZE / minTxOutSz;
 
     // extract and validate vout
-    string strVout = strInput.substr(pos + 1, string::npos);
+    string strVout = vStrInputParts[1];
     int vout = atoi(strVout);
     // BU: be strict about what is generated.  TODO: BLOCKSTREAM_CORE_MAX_BLOCK_SIZE should be converted to a cmd line
     // parameter
     if ((vout < 0) || (vout > (int)maxVout))
         throw runtime_error("invalid TX input vout");
 
+    // extract the optional sequence number
+    uint32_t nSequenceIn = std::numeric_limits<unsigned int>::max();
+    if (vStrInputParts.size() > 2)
+        nSequenceIn = std::stoul(vStrInputParts[2]);
+
     // append to transaction input list
-    CTxIn txin(txid, vout);
+    CTxIn txin(txid, vout, CScript(), nSequenceIn);
     tx.vin.push_back(txin);
 }
 
 static void MutateTxAddOutAddr(CMutableTransaction &tx, const string &strInput)
 {
     // separate VALUE:ADDRESS in string
-    size_t pos = strInput.find(':');
-    if ((pos == string::npos) || (pos == 0) || (pos == (strInput.size() - 1)))
-        throw runtime_error("TX output missing separator");
+    std::vector<std::string> vStrInputParts;
+    boost::split(vStrInputParts, strInput, boost::is_any_of(":"));
 
-    // extract and validate VALUE
-    string strValue = strInput.substr(0, pos);
-    CAmount value;
-    if (!ParseMoney(strValue, value))
-        throw runtime_error("invalid TX output value");
+    if (vStrInputParts.size() != 2)
+        throw runtime_error("TX output missing or too many separators");
+
+    // Extract and validate VALUE
+    CAmount value = ExtractAndValidateValue(vStrInputParts[0]);
 
     // extract and validate ADDRESS
-    string strAddr = strInput.substr(pos + 1, string::npos);
-    CBitcoinAddress addr(strAddr);
-    if (!addr.IsValid())
-        throw runtime_error("invalid TX output address");
-
-    // build standard output script via GetScriptForDestination()
-    CScript scriptPubKey = GetScriptForDestination(addr.Get());
+    std::string strAddr = vStrInputParts[1];
+    CTxDestination destination = DecodeDestination(strAddr);
+    if (!IsValidDestination(destination))
+    {
+        throw std::runtime_error("invalid TX output address");
+    }
+    CScript scriptPubKey = GetScriptForDestination(destination);
 
     // construct TxOut, append to transaction output list
     CTxOut txout(value, scriptPubKey);
     tx.vout.push_back(txout);
 }
 
-static void MutateTxAddOutData(CMutableTransaction &tx, const string &strInput)
+static void MutateTxAddOutData(CMutableTransaction &tx, const std::string &strInput)
 {
     CAmount value = 0;
 
@@ -298,19 +315,30 @@ static void MutateTxAddOutData(CMutableTransaction &tx, const string &strInput)
 static void MutateTxAddOutScript(CMutableTransaction &tx, const string &strInput)
 {
     // separate VALUE:SCRIPT in string
-    size_t pos = strInput.find(':');
-    if ((pos == string::npos) || (pos == 0))
+    std::vector<std::string> vStrInputParts;
+    boost::split(vStrInputParts, strInput, boost::is_any_of(":"));
+    if (vStrInputParts.size() < 2)
         throw runtime_error("TX output missing separator");
 
     // extract and validate VALUE
-    string strValue = strInput.substr(0, pos);
-    CAmount value;
-    if (!ParseMoney(strValue, value))
-        throw runtime_error("invalid TX output value");
+    CAmount value = ExtractAndValidateValue(vStrInputParts[0]);
 
     // extract and validate script
-    string strScript = strInput.substr(pos + 1, string::npos);
-    CScript scriptPubKey = ParseScript(strScript); // throws on err
+    std::string strScript = vStrInputParts[1];
+    CScript scriptPubKey = ParseScript(strScript);
+
+    // Extract FLAGS
+    bool bScriptHash = false;
+    if (vStrInputParts.size() > 2)
+    {
+        std::string flags = vStrInputParts.back();
+        bScriptHash = (flags.find("S") != std::string::npos);
+    }
+
+    if (bScriptHash)
+    {
+        scriptPubKey = GetScriptForDestination(CScriptID(scriptPubKey));
+    }
 
     // construct TxOut, append to transaction output list
     CTxOut txout(value, scriptPubKey);
@@ -468,6 +496,7 @@ static void MutateTxSign(CMutableTransaction &tx, const string &flagStr)
             CScript scriptPubKey(pkData.begin(), pkData.end());
 
             {
+                LOCK(view.cs_utxo);
                 const Coin &coin = view.AccessCoin(out);
                 if (!coin.IsSpent() && coin.out.scriptPubKey != scriptPubKey)
                 {
@@ -505,6 +534,8 @@ static void MutateTxSign(CMutableTransaction &tx, const string &flagStr)
     // Sign what we can:
     for (unsigned int i = 0; i < mergedTx.vin.size(); i++)
     {
+        LOCK(view.cs_utxo);
+
         CTxIn &txin = mergedTx.vin[i];
         const Coin &coin = view.AccessCoin(txin.prevout);
         if (coin.IsSpent())
@@ -521,7 +552,7 @@ static void MutateTxSign(CMutableTransaction &tx, const string &flagStr)
             SignSignature(keystore, prevPubKey, mergedTx, i, amount, nHashType);
 
         // ... and merge in other signatures:
-        BOOST_FOREACH (const CTransaction &txv, txVariants)
+        for (const CTransaction &txv : txVariants)
         {
             txin.scriptSig = CombineSignatures(prevPubKey, MutableTransactionSignatureChecker(&mergedTx, i, amount),
                 txin.scriptSig, txv.vin[i].scriptSig);

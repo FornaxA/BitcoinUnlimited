@@ -1,6 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -245,7 +245,10 @@ public:
     void ignore(int nSize)
     {
         // Ignore from the beginning of the buffer
-        assert(nSize >= 0);
+        if (nSize < 0)
+        {
+            throw std::ios_base::failure("CDataStream::ignore(): nSize negative");
+        }
         unsigned int nReadPosNext = nReadPos + nSize;
         if (nReadPosNext >= vch.size())
         {
@@ -507,7 +510,7 @@ public:
             throw std::ios_base::failure("Read attempted past buffer limit");
         if (nSize + nRewind > vchBuf.size()) // What's already read + what I want to read + how far I want to rewind
         {
-            LogPrint("reindex", "Large read, growing buffer\n", nSize);
+            LOG(REINDEX, "Large read, growing buffer (size: %lld)\n", nSize);
             GrowTo(nSize + nRewind + RESIZE_EXTRA);
             if (nSize + nRewind > vchBuf.size()) // make sure it worked
                 throw std::ios_base::failure("Read larger than buffer size");
@@ -537,15 +540,15 @@ public:
         nReadPos = nPos;
         if (nReadPos + nRewind < nSrcPos)
         {
-            LogPrint("reindex", "Short SetPos: desired %lld actual %lld srcpos %lld buffer size %lld, rewind %lld\n",
-                nPos, nReadPos, nSrcPos, vchBuf.size(), nRewind);
+            LOG(REINDEX, "Short SetPos: desired %lld actual %lld srcpos %lld buffer size %lld, rewind %lld\n", nPos,
+                nReadPos, nSrcPos, vchBuf.size(), nRewind);
             nReadPos = nSrcPos - nRewind;
             return false;
         }
         else if (nReadPos > nSrcPos)
         {
-            LogPrint("reindex", "Long SetPos: desired %lld actual %lld srcpos %lld buffer size %lld, rewind %lld\n",
-                nPos, nReadPos, nSrcPos, vchBuf.size(), nRewind);
+            LOG(REINDEX, "Long SetPos: desired %lld actual %lld srcpos %lld buffer size %lld, rewind %lld\n", nPos,
+                nReadPos, nSrcPos, vchBuf.size(), nRewind);
             nReadPos = nSrcPos;
             return false;
         }
@@ -610,7 +613,7 @@ public:
             // Resize is inefficient, so at a minimum double the buffer to make # resizes log(n)
             amt = std::max(amt, ((uint64_t)vchBuf.size()) * 2);
             vchBuf.resize(amt, 0);
-            LogPrint("reindex", "File buffer resize to %s\n", vchBuf.size());
+            LOG(REINDEX, "File buffer resize to %s\n", vchBuf.size());
 
             // Now at this new buffer size the boundaries will be different so I have to reload the rewinded data
             // Position the data to be read at the start of the old maximum rewind (or the file beginning)

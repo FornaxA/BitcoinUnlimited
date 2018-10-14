@@ -1,6 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -26,18 +26,22 @@ int GetRandInt(int nMax);
 uint256 GetRandHash();
 
 /**
- * Seed insecure_rand using the random pool.
- * @param Deterministic Use a deterministic seed
- */
-void seed_insecure_rand(bool fDeterministic = false);
-
-/**
  * Fast randomness source. This is seeded once with secure random data, but
  * is completely deterministic and insecure after that.
  * This class is not thread-safe.
  */
 class FastRandomContext
 {
+private:
+    uint64_t bitbuf;
+    int bitbuf_size;
+
+    void FillBitBuffer()
+    {
+        bitbuf = rand64();
+        bitbuf_size = 64;
+    }
+
 public:
     explicit FastRandomContext(bool fDeterministic = false);
 
@@ -59,6 +63,27 @@ public:
     }
 
     bool randbool() { return rand32() & 1; }
+    uint64_t randbits(int bits)
+    {
+        if (bits == 0)
+        {
+            return 0;
+        }
+        else if (bits > 32)
+        {
+            return rand64() >> (64 - bits);
+        }
+        else
+        {
+            if (bitbuf_size < bits)
+                FillBitBuffer();
+
+            uint64_t ret = bitbuf & (~uint64_t(0) >> (64 - bits));
+            bitbuf >>= bits;
+            bitbuf_size -= bits;
+            return ret;
+        }
+    }
 };
 
 /* Number of random bytes returned by GetOSRand.
@@ -72,17 +97,5 @@ static const ssize_t NUM_OS_RANDOM_BYTES = 32;
  * GetStrongRandBytes instead.
  */
 void GetOSRand(unsigned char *ent32);
-
-/** Check that OS randomness is available and returning the requested number
- * of bytes.
- */
-extern uint32_t insecure_rand_Rz;
-extern uint32_t insecure_rand_Rw;
-static inline uint32_t insecure_rand(void)
-{
-    insecure_rand_Rz = 36969 * (insecure_rand_Rz & 65535) + (insecure_rand_Rz >> 16);
-    insecure_rand_Rw = 18000 * (insecure_rand_Rw & 65535) + (insecure_rand_Rw >> 16);
-    return (insecure_rand_Rw << 16) + insecure_rand_Rz;
-}
 
 #endif // BITCOIN_RANDOM_H

@@ -1,11 +1,9 @@
 // Copyright (c) 2014-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "networkstyle.h"
-#include "clientversion.h" // for BITCOIN_CASH define (if on BUCash branch)
-
 #include "guiconstants.h"
 
 #include <QApplication>
@@ -17,23 +15,18 @@ static const struct
     const int iconColorHueShift;
     const int iconColorSaturationReduction;
     const char *titleAddText;
-} network_styles[] = {
-#ifdef BITCOIN_CASH
-    {"main", QAPP_APP_NAME_BUCASH, 0, 0, ""},
-#else
-    {"main", QAPP_APP_NAME_DEFAULT, 0, 0, ""},
-#endif
+} network_styles[] = {{"main", QAPP_APP_NAME_BUCASH, 0, 0, ""},
     {"test", QAPP_APP_NAME_TESTNET, 70, 30, QT_TRANSLATE_NOOP("SplashScreen", "[testnet]")},
     {"nol", QAPP_APP_NAME_NOLNET, 70, 30, QT_TRANSLATE_NOOP("SplashScreen", "[nolimit]")}, // BU
     {"regtest", QAPP_APP_NAME_TESTNET, 160, 30, "[regtest]"}};
 static const unsigned network_styles_count = sizeof(network_styles) / sizeof(*network_styles);
 
 // titleAddText needs to be const char* for tr()
-NetworkStyle::NetworkStyle(const QString &appName,
+NetworkStyle::NetworkStyle(const QString &_appName,
     const int iconColorHueShift,
     const int iconColorSaturationReduction,
-    const char *titleAddText)
-    : appName(appName), titleAddText(qApp->translate("SplashScreen", titleAddText))
+    const char *_titleAddText)
+    : appName(_appName), titleAddText(qApp->translate("SplashScreen", _titleAddText))
 {
     // load pixmap
     QPixmap pixmap(":/icons/bitcoin");
@@ -76,12 +69,8 @@ NetworkStyle::NetworkStyle(const QString &appName,
             }
         }
 
-// convert back to QPixmap
-#if QT_VERSION >= 0x040700
+        // convert back to QPixmap
         pixmap.convertFromImage(img);
-#else
-        pixmap = QPixmap::fromImage(img);
-#endif
     }
 
     appIcon = QIcon(pixmap);

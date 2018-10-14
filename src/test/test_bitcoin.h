@@ -76,7 +76,8 @@ struct TestMemPoolEntryHelper
     {
     }
 
-    CTxMemPoolEntry FromTx(CMutableTransaction &tx, CTxMemPool *pool = NULL);
+    CTxMemPoolEntry FromTx(const CMutableTransaction &tx, CTxMemPool *pool = nullptr);
+    CTxMemPoolEntry FromTx(const CTransaction &tx, CTxMemPool *pool = nullptr);
 
     // Change the default value
     TestMemPoolEntryHelper &Fee(CAmount _fee)
@@ -115,4 +116,9 @@ struct TestMemPoolEntryHelper
         return *this;
     }
 };
+
+// define an implicit conversion here so that uint256 may be used directly in BOOST_CHECK_*
+std::ostream &operator<<(std::ostream &os, const uint256 &num);
+
+
 #endif

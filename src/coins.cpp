@@ -1,5 +1,5 @@
 // Copyright (c) 2012-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -15,7 +15,10 @@
 bool CCoinsView::GetCoin(const COutPoint &outpoint, Coin &coin) const { return false; }
 bool CCoinsView::HaveCoin(const COutPoint &outpoint) const { return false; }
 uint256 CCoinsView::GetBestBlock() const { return uint256(); }
-bool CCoinsView::BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, size_t &nChildCachedCoinsUsage)
+bool CCoinsView::BatchWrite(CCoinsMap &mapCoins,
+    const uint256 &hashBlock,
+    const uint64_t nBestCoinHeight,
+    size_t &nChildCachedCoinsUsage)
 {
     return false;
 }
@@ -25,9 +28,12 @@ bool CCoinsViewBacked::GetCoin(const COutPoint &outpoint, Coin &coin) const { re
 bool CCoinsViewBacked::HaveCoin(const COutPoint &outpoint) const { return base->HaveCoin(outpoint); }
 uint256 CCoinsViewBacked::GetBestBlock() const { return base->GetBestBlock(); }
 void CCoinsViewBacked::SetBackend(CCoinsView &viewIn) { base = &viewIn; }
-bool CCoinsViewBacked::BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, size_t &nChildCachedCoinsUsage)
+bool CCoinsViewBacked::BatchWrite(CCoinsMap &mapCoins,
+    const uint256 &hashBlock,
+    const uint64_t nBestCoinHeight,
+    size_t &nChildCachedCoinsUsage)
 {
-    return base->BatchWrite(mapCoins, hashBlock, nChildCachedCoinsUsage);
+    return base->BatchWrite(mapCoins, hashBlock, nBestCoinHeight, nChildCachedCoinsUsage);
 }
 CCoinsViewCursor *CCoinsViewBacked::Cursor() const { return base->Cursor(); }
 size_t CCoinsViewBacked::EstimateSize() const { return base->EstimateSize(); }
@@ -36,7 +42,10 @@ SaltedOutpointHasher::SaltedOutpointHasher()
 {
 }
 
-CCoinsViewCache::CCoinsViewCache(CCoinsView *baseIn) : CCoinsViewBacked(baseIn), cachedCoinsUsage(0) {}
+CCoinsViewCache::CCoinsViewCache(CCoinsView *baseIn) : CCoinsViewBacked(baseIn), nBestCoinHeight(0), cachedCoinsUsage(0)
+{
+}
+
 size_t CCoinsViewCache::DynamicMemoryUsage() const
 {
     LOCK(cs_utxo);
@@ -78,6 +87,10 @@ CCoinsMap::iterator CCoinsViewCache::FetchCoin(const COutPoint &outpoint) const
         ret->second.flags = CCoinsCacheEntry::FRESH;
     }
     cachedCoinsUsage += ret->second.coin.DynamicMemoryUsage();
+
+    if (nBestCoinHeight < ret->second.coin.nHeight)
+        nBestCoinHeight = ret->second.coin.nHeight;
+
     return ret;
 }
 
@@ -119,6 +132,8 @@ void CCoinsViewCache::AddCoin(const COutPoint &outpoint, Coin &&coin, bool possi
     it->second.coin = std::move(coin);
     it->second.flags |= CCoinsCacheEntry::DIRTY | (fresh ? CCoinsCacheEntry::FRESH : 0);
     cachedCoinsUsage += it->second.coin.DynamicMemoryUsage();
+    if (nBestCoinHeight < it->second.coin.nHeight)
+        nBestCoinHeight = it->second.coin.nHeight;
 }
 
 void AddCoins(CCoinsViewCache &cache, const CTransaction &tx, int nHeight)
@@ -159,7 +174,10 @@ static const Coin coinEmpty;
 
 const Coin &CCoinsViewCache::AccessCoin(const COutPoint &outpoint) const
 {
-    LOCK(cs_utxo);
+    // We may return a reference to a coin cache entry so therefore we must make sure the caller
+    // has taken a lock on cs_utxo.
+    AssertLockHeld(cs_utxo);
+
     CCoinsMap::const_iterator it = FetchCoin(outpoint);
     if (it == cacheCoins.end())
     {
@@ -199,14 +217,17 @@ void CCoinsViewCache::SetBestBlock(const uint256 &hashBlockIn)
     hashBlock = hashBlockIn;
 }
 
-bool CCoinsViewCache::BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlockIn, size_t &nChildCachedCoinsUsage)
+bool CCoinsViewCache::BatchWrite(CCoinsMap &mapCoins,
+    const uint256 &hashBlockIn,
+    const uint64_t nBestCoinHeightIn,
+    size_t &nChildCachedCoinsUsage)
 {
     LOCK(cs_utxo);
     for (CCoinsMap::iterator it = mapCoins.begin(); it != mapCoins.end();)
     {
         if (it->second.flags & CCoinsCacheEntry::DIRTY)
         { // Ignore non-dirty entries (optimization).
-            // Update usage of the chile cache before we do any swapping and deleting
+            // Update usage of the child cache before we do any swapping and deleting
             nChildCachedCoinsUsage -= it->second.coin.DynamicMemoryUsage();
 
             CCoinsMap::iterator itUs = cacheCoins.find(it->first);
@@ -265,22 +286,93 @@ bool CCoinsViewCache::BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlockIn
             it++;
     }
     hashBlock = hashBlockIn;
+    if (nBestCoinHeightIn > nBestCoinHeight)
+        nBestCoinHeight = nBestCoinHeightIn;
+
     return true;
 }
 
 bool CCoinsViewCache::Flush()
 {
     LOCK(cs_utxo);
-    bool fOk = base->BatchWrite(cacheCoins, hashBlock, cachedCoinsUsage);
+    bool fOk = base->BatchWrite(cacheCoins, hashBlock, nBestCoinHeight, cachedCoinsUsage);
     return fOk;
 }
 
 void CCoinsViewCache::Trim(size_t nTrimSize) const
 {
-    uint64_t nTrimmed = 0;
-
     LOCK(cs_utxo);
+
+    uint64_t nTrimmed = 0;
+    uint64_t nTrimmedByHeight = 0;
+    static uint64_t nTrimHeightDelta = nBestCoinHeight * 0.80; // This is where we attempt to do our first trim
+    uint64_t nTrimHeight = nBestCoinHeight - nTrimHeightDelta;
+
+    // if we've already walked the nTrimHeight all the way back as far as we can go and there is nothing to trim
+    // then no need to check further.  This should be the typical state after a block sync is completed and there is
+    // enough dbcache to hold all the coins from recent transactions in memory.
+    if (nTrimHeight == 0 && DynamicMemoryUsage() <= nTrimSize)
+        return;
+
+    // Begin first Trim loop. This loop will trim coins from cache by the coin height, removing the oldest coins first.
+    // This has been proven to improve sync performance significantly for nodes that can not hold the entire dbcache
+    // in memory.
+    bool fDone = false;
+    uint64_t nSmallestDelta = 50; // number of blocks to adjust trim height by
     CCoinsMap::iterator iter = cacheCoins.begin();
+    while (!fDone && DynamicMemoryUsage() > nTrimSize)
+    {
+        LOG(COINDB, "cacheCoinsUsage at start: %d total dynamic usage: %d trim to size: %d nBestCoinHeight: %d "
+                    "trim height:%d\n",
+            cachedCoinsUsage, DynamicMemoryUsage(), nTrimSize, nBestCoinHeight, nTrimHeight);
+
+        iter = cacheCoins.begin();
+        while (DynamicMemoryUsage() > nTrimSize)
+        {
+            if (iter == cacheCoins.end())
+            {
+                fDone = true;
+                break;
+            }
+
+            if (iter->second.flags == 0 && iter->second.coin.nHeight < nTrimHeight)
+            {
+                cachedCoinsUsage -= iter->second.coin.DynamicMemoryUsage();
+
+                iter = cacheCoins.erase(iter);
+                nTrimmed++;
+                nTrimmedByHeight++;
+            }
+            else
+                iter++;
+        }
+
+        // Gradually increase the nTrimHeight if we didn't trim enought entries.
+        if (fDone && DynamicMemoryUsage() > nTrimSize && nTrimHeightDelta > nSmallestDelta)
+        {
+            if (nTrimHeightDelta <= nSmallestDelta * 100)
+                nTrimHeightDelta =
+                    (nTrimHeightDelta > (nSmallestDelta * 2) ? nTrimHeightDelta - (nSmallestDelta * 2) : 0);
+            else if (nTrimHeightDelta <= nSmallestDelta * 400)
+                nTrimHeightDelta =
+                    (nTrimHeightDelta > (nSmallestDelta * 10) ? nTrimHeightDelta - (nSmallestDelta * 10) : 0);
+            else
+                nTrimHeightDelta =
+                    (nTrimHeightDelta > (nSmallestDelta * 200) ? nTrimHeightDelta - (nSmallestDelta * 200) : 0);
+
+            nTrimHeight = (nBestCoinHeight > nTrimHeightDelta ? nBestCoinHeight - nTrimHeightDelta : 0);
+
+            // We're not done yet. We've adjusted the nTrimHeight so we have to go back and trim again.
+            fDone = false;
+
+            LOG(COINDB, "Re-adjusting trim height to %d using a trim height delta of %d\n", nTrimHeight,
+                nTrimHeightDelta);
+        }
+    }
+
+    // If trimming by coin height failed to find any or enough coins to trim then trim the cache by ignoring
+    // coin height. While this is not ideal we still have to trim to keep the cache from growing unbounded.
+    iter = cacheCoins.begin();
     while (DynamicMemoryUsage() > nTrimSize)
     {
         if (iter == cacheCoins.end())
@@ -291,28 +383,49 @@ void CCoinsViewCache::Trim(size_t nTrimSize) const
         {
             cachedCoinsUsage -= iter->second.coin.DynamicMemoryUsage();
 
-            CCoinsMap::iterator itOld = iter++;
-            cacheCoins.erase(itOld);
+            iter = cacheCoins.erase(iter);
             nTrimmed++;
         }
         else
             iter++;
     }
-
     if (nTrimmed > 0)
-        LogPrint("coindb", "Trimmed %ld from the CoinsViewCache, current size after trim: %ld and usage %ld bytes\n",
-            nTrimmed, cacheCoins.size(), cachedCoinsUsage);
+    {
+        LOG(COINDB, "Trimmed %d by coin height\n", nTrimmedByHeight);
+        LOG(COINDB, "Trimmed %ld from the CoinsViewCache, current size after trim: %ld and usage %ld bytes\n", nTrimmed,
+            cacheCoins.size(), cachedCoinsUsage);
+    }
+
+    // If we're not trimming anything then gradually walk the trim height backwards from the tip.  This is to adjust
+    // and account for the possiblity that the average block size could be getting smaller for certain periods of time
+    // and thus we can keep more of the recent coins from getting trimmed.
+    if (nTrimmedByHeight == 0 && nTrimmed == 0)
+    {
+        nTrimHeightDelta += nSmallestDelta;
+        if (nTrimHeightDelta > nBestCoinHeight)
+            nTrimHeightDelta = nBestCoinHeight;
+        nTrimHeight = nBestCoinHeight - nTrimHeightDelta;
+        LOG(COINDB, "Re-adjusting trim height to %d using a trim height delta of %d\n", nTrimHeight, nTrimHeightDelta);
+    }
 }
 
 void CCoinsViewCache::Uncache(const COutPoint &hash)
 {
     LOCK(cs_utxo);
     CCoinsMap::iterator it = cacheCoins.find(hash);
+
+    // only uncache coins that are not dirty.
     if (it != cacheCoins.end() && it->second.flags == 0)
     {
         cachedCoinsUsage -= it->second.coin.DynamicMemoryUsage();
         cacheCoins.erase(it);
     }
+}
+
+void CCoinsViewCache::UncacheTx(const CTransaction &tx)
+{
+    for (const CTxIn &txin : tx.vin)
+        Uncache(txin.prevout);
 }
 
 unsigned int CCoinsViewCache::GetCacheSize() const
@@ -357,7 +470,7 @@ double CCoinsViewCache::GetPriority(const CTransaction &tx, int nHeight, CAmount
     if (tx.IsCoinBase())
         return 0.0;
     double dResult = 0.0;
-    BOOST_FOREACH (const CTxIn &txin, tx.vin)
+    for (const CTxIn &txin : tx.vin)
     {
         const Coin &coin = AccessCoin(txin.prevout);
         if (coin.IsSpent())
@@ -377,6 +490,10 @@ static const size_t nMaxOutputsPerBlock =
     DEFAULT_LARGEST_TRANSACTION / ::GetSerializeSize(CTxOut(), SER_NETWORK, PROTOCOL_VERSION);
 const Coin &AccessByTxid(const CCoinsViewCache &view, const uint256 &txid)
 {
+    // We may return a reference to a coin cache entry so therefore we must make sure the caller
+    // has taken a lock on cs_utxo.
+    AssertLockHeld(view.cs_utxo);
+
     COutPoint iter(txid, 0);
     while (iter.n < nMaxOutputsPerBlock)
     {

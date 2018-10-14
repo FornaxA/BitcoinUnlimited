@@ -14,6 +14,7 @@
 #include <ios>
 #include <limits>
 #include <map>
+#include <memory>
 #include <set>
 #include <stdint.h>
 #include <string.h>
@@ -24,6 +25,22 @@
 #include "prevector.h"
 
 static const unsigned int MAX_SIZE = 0x02000000 * 8; // BU Allow 256MB JSON encodings
+
+/**
+ * Dummy data type to identify deserializing constructors.
+ *
+ * By convention, a constructor of a type T with signature
+ *
+ *   template <typename Stream> T::T(deserialize_type, Stream& s)
+ *
+ * is a deserializing constructor, which builds the type by
+ * deserializing it from s. If T contains const fields, this
+ * is likely the only way to do so.
+ */
+struct deserialize_type
+{
+};
+constexpr deserialize_type deserialize{};
 
 /**
  * Used to bypass the rule against non-const reference to temporary
@@ -104,28 +121,28 @@ inline void ser_writedata64(Stream &s, uint64_t obj)
 template <typename Stream>
 inline uint8_t ser_readdata8(Stream &s)
 {
-    uint8_t obj;
+    uint8_t obj = 0;
     s.read((char *)&obj, 1);
     return obj;
 }
 template <typename Stream>
 inline uint16_t ser_readdata16(Stream &s)
 {
-    uint16_t obj;
+    uint16_t obj = 0;
     s.read((char *)&obj, 2);
     return le16toh(obj);
 }
 template <typename Stream>
 inline uint32_t ser_readdata32(Stream &s)
 {
-    uint32_t obj;
+    uint32_t obj = 0;
     s.read((char *)&obj, 4);
     return le32toh(obj);
 }
 template <typename Stream>
 inline uint64_t ser_readdata64(Stream &s)
 {
-    uint64_t obj;
+    uint64_t obj = 0;
     s.read((char *)&obj, 8);
     return le64toh(obj);
 }
@@ -183,8 +200,7 @@ enum
     SER_GETHASH = (1 << 2),
 };
 
-#define READWRITE(obj) (::SerReadWrite(s, (obj), ser_action))
-#define READWRITEMANY(...) (::SerReadWriteMany(s, ser_action, __VA_ARGS__))
+#define READWRITE(...) (::SerReadWriteMany(s, ser_action, __VA_ARGS__))
 
 /**
  * Implement three methods for serializable objects. These are actually wrappers over
@@ -436,9 +452,39 @@ uint64_t ReadCompactSize(Stream &is)
  * 2^32:           [0x8E 0xFE 0xFE 0xFF 0x00]
  */
 
-template <typename I>
+
+/**
+ * Mode for encoding VarInts.
+ *
+ * Currently there is no support for signed encodings. The default mode will not
+ * compile with signed values, and the legacy "nonnegative signed" mode will
+ * accept signed values, but improperly encode and decode them if they are
+ * negative. In the future, the DEFAULT mode could be extended to support
+ * negative numbers in a backwards compatible way, and additional modes could be
+ * added to support different varint formats (e.g. zigzag encoding).
+ */
+enum class VarIntMode
+{
+    DEFAULT,
+    NONNEGATIVE_SIGNED
+};
+
+template <VarIntMode Mode, typename I>
+struct CheckVarIntMode
+{
+    constexpr CheckVarIntMode()
+    {
+        static_assert(
+            Mode != VarIntMode::DEFAULT || std::is_unsigned<I>::value, "Unsigned type required with mode DEFAULT.");
+        static_assert(Mode != VarIntMode::NONNEGATIVE_SIGNED || std::is_signed<I>::value,
+            "Signed type required with mode NONNEGATIVE_SIGNED.");
+    }
+};
+
+template <VarIntMode Mode, typename I>
 inline unsigned int GetSizeOfVarInt(I n)
 {
+    CheckVarIntMode<Mode, I>();
     int nRet = 0;
     while (true)
     {
@@ -453,9 +499,10 @@ inline unsigned int GetSizeOfVarInt(I n)
 template <typename I>
 inline void WriteVarInt(CSizeComputer &os, I n);
 
-template <typename Stream, typename I>
+template <typename Stream, VarIntMode Mode, typename I>
 void WriteVarInt(Stream &os, I n)
 {
+    CheckVarIntMode<Mode, I>();
     unsigned char tmp[(sizeof(n) * 8 + 6) / 7];
     int len = 0;
     while (true)
@@ -472,9 +519,10 @@ void WriteVarInt(Stream &os, I n)
     } while (len--);
 }
 
-template <typename Stream, typename I>
+template <typename Stream, VarIntMode Mode, typename I>
 I ReadVarInt(Stream &is)
 {
+    CheckVarIntMode<Mode, I>();
     I n = 0;
     while (true)
     {
@@ -500,7 +548,7 @@ I ReadVarInt(Stream &is)
 }
 
 #define FLATDATA(obj) REF(CFlatData((char *)&(obj), (char *)&(obj) + sizeof(obj)))
-#define VARINT(obj) REF(WrapVarInt(REF(obj)))
+#define VARINT(obj, ...) REF(WrapVarInt<__VA_ARGS__>(REF(obj)))
 #define COMPACTSIZE(obj) REF(CCompactSize(REF(obj)))
 #define LIMITED_STRING(obj, n) REF(LimitedString<n>(REF(obj)))
 
@@ -544,7 +592,7 @@ public:
     }
 };
 
-template <typename I>
+template <VarIntMode Mode, typename I>
 class CVarInt
 {
 protected:
@@ -555,13 +603,13 @@ public:
     template <typename Stream>
     void Serialize(Stream &s) const
     {
-        WriteVarInt<Stream, I>(s, n);
+        WriteVarInt<Stream, Mode, I>(s, n);
     }
 
     template <typename Stream>
     void Unserialize(Stream &s)
     {
-        n = ReadVarInt<Stream, I>(s);
+        n = ReadVarInt<Stream, Mode, I>(s);
     }
 };
 
@@ -615,10 +663,10 @@ public:
     }
 };
 
-template <typename I>
-CVarInt<I> WrapVarInt(I &n)
+template <VarIntMode Mode = VarIntMode::DEFAULT, typename I>
+CVarInt<Mode, I> WrapVarInt(I &n)
 {
-    return CVarInt<I>(n);
+    return CVarInt<Mode, I>{n};
 }
 
 /**
@@ -690,6 +738,22 @@ template <typename Stream, typename K, typename Pred, typename A>
 void Serialize(Stream &os, const std::set<K, Pred, A> &m);
 template <typename Stream, typename K, typename Pred, typename A>
 void Unserialize(Stream &is, std::set<K, Pred, A> &m);
+
+/**
+ * shared_ptr
+ */
+template <typename Stream, typename T>
+void Serialize(Stream &os, const std::shared_ptr<const T> &p);
+template <typename Stream, typename T>
+void Unserialize(Stream &os, std::shared_ptr<const T> &p);
+
+/**
+ * unique_ptr
+ */
+template <typename Stream, typename T>
+void Serialize(Stream &os, const std::unique_ptr<const T> &p);
+template <typename Stream, typename T>
+void Unserialize(Stream &os, std::unique_ptr<const T> &p);
 
 
 /**
@@ -934,6 +998,38 @@ void Unserialize(Stream &is, std::set<K, Pred, A> &m)
 
 
 /**
+ * unique_ptr
+ */
+template <typename Stream, typename T>
+void Serialize(Stream &os, const std::unique_ptr<const T> &p)
+{
+    Serialize(os, *p);
+}
+
+template <typename Stream, typename T>
+void Unserialize(Stream &is, std::unique_ptr<const T> &p)
+{
+    p.reset(new T(deserialize, is));
+}
+
+
+/**
+ * shared_ptr
+ */
+template <typename Stream, typename T>
+void Serialize(Stream &os, const std::shared_ptr<const T> &p)
+{
+    Serialize(os, *p);
+}
+
+template <typename Stream, typename T>
+void Unserialize(Stream &is, std::shared_ptr<const T> &p)
+{
+    p = std::make_shared<const T>(deserialize, is);
+}
+
+
+/**
  * Support for ADD_SERIALIZE_METHODS and READWRITE macro
  */
 struct CSerActionSerialize
@@ -944,18 +1040,6 @@ struct CSerActionUnserialize
 {
     constexpr bool ForRead() const { return true; }
 };
-
-template <typename Stream, typename T>
-inline void SerReadWrite(Stream &s, const T &obj, CSerActionSerialize ser_action)
-{
-    ::Serialize(s, obj);
-}
-
-template <typename Stream, typename T>
-inline void SerReadWrite(Stream &s, T &obj, CSerActionUnserialize ser_action)
-{
-    ::Unserialize(s, obj);
-}
 
 
 /* ::GetSerializeSize implementations

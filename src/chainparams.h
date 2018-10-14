@@ -1,6 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -70,6 +70,8 @@ public:
     };
 
     const Consensus::Params &GetConsensus() const { return consensus; }
+    /** Modifiable consensus parameters added by bip135, is not threadsafe, only use during initializtion */
+    Consensus::Params &GetModifiableConsensus() { return consensus; }
     const CMessageHeader::MessageStartChars &MessageStart() const { return pchMessageStart; }
     const CMessageHeader::MessageStartChars &CashMessageStart() const { return pchCashMessageStart; }
     int GetDefaultPort() const { return nDefaultPort; }
@@ -79,7 +81,7 @@ public:
     /** Default value for -checkmempool and -checkblockindex argument */
     bool DefaultConsistencyChecks() const { return fDefaultConsistencyChecks; }
     /** Policy: Filter transactions that do not match well-defined patterns */
-    bool RequireStandard() const { return fRequireStandard; }
+    bool RequireStandard() const;
     uint64_t PruneAfterHeight() const { return nPruneAfterHeight; }
     /** Make miner stop after a block is found. In RPC, don't return until nGenProcLimit blocks are generated */
     bool MineBlocksOnDemand() const { return fMineBlocksOnDemand; }
@@ -88,7 +90,8 @@ public:
     /** Return the BIP70 network string (main, test or regtest) */
     std::string NetworkIDString() const { return strNetworkID; }
     const std::vector<CDNSSeedData> &DNSSeeds() const { return vSeeds; }
-    const std::vector<unsigned char> &Base58Prefix(Base58Type type) const { return base58Prefixes[type]; }
+    const std::vector<uint8_t> &Base58Prefix(Base58Type type) const { return base58Prefixes[type]; }
+    const std::string &CashAddrPrefix() const { return cashaddrPrefix; }
     const std::vector<SeedSpec6> &FixedSeeds() const { return vFixedSeeds; }
     const CCheckpointData &Checkpoints() const { return checkpointData; }
 protected:
@@ -99,7 +102,8 @@ protected:
     int nDefaultPort;
     uint64_t nPruneAfterHeight;
     std::vector<CDNSSeedData> vSeeds;
-    std::vector<unsigned char> base58Prefixes[MAX_BASE58_TYPES];
+    std::vector<uint8_t> base58Prefixes[MAX_BASE58_TYPES];
+    std::string cashaddrPrefix;
     std::string strNetworkID;
     CBlock genesis;
     std::vector<SeedSpec6> vFixedSeeds;
@@ -136,5 +140,27 @@ CBlock CreateGenesisBlock(CScript prefix,
     uint32_t nBits,
     int32_t nVersion,
     const CAmount &genesisReward);
+
+// bip135 begin
+/**
+ * Return the currently selected parameters. Can be changed by reading in
+ * some additional config files (e.g. CSV deployment data)
+ *
+ * This can only be used during initialization because modification is not threadsafe
+ */
+CChainParams &ModifiableParams();
+
+/**
+ * Returns true if a deployment is considered active on a particular network
+ */
+
+bool IsConfiguredDeployment(const Consensus::Params &consensusParams, const int bit);
+
+/**
+ * Dump the fork deployment parameters for the given BIP70 chain name.
+ * @throws std::runtime_error when the chain is not supported.
+ */
+const std::string NetworkDeploymentInfoCSV(const std::string &chain);
+// bip135 end
 
 #endif // BITCOIN_CHAINPARAMS_H

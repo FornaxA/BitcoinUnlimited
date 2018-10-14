@@ -1,10 +1,9 @@
 // Copyright (c) 2011-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "bitcoinunits.h"
-
 #include "primitives/transaction.h"
 
 #include <QStringList>
@@ -13,9 +12,9 @@ BitcoinUnits::BitcoinUnits(QObject *parent) : QAbstractListModel(parent), unitli
 QList<BitcoinUnits::Unit> BitcoinUnits::availableUnits()
 {
     QList<BitcoinUnits::Unit> unitlist;
-    unitlist.append(BTC);
-    unitlist.append(mBTC);
-    unitlist.append(uBTC);
+    unitlist.append(BCH);
+    unitlist.append(mBCH);
+    unitlist.append(XCH);
     return unitlist;
 }
 
@@ -23,9 +22,9 @@ bool BitcoinUnits::valid(int unit)
 {
     switch (unit)
     {
-    case BTC:
-    case mBTC:
-    case uBTC:
+    case BCH:
+    case mBCH:
+    case XCH:
         return true;
     default:
         return false;
@@ -36,12 +35,12 @@ QString BitcoinUnits::name(int unit)
 {
     switch (unit)
     {
-    case BTC:
-        return QString("BTC");
-    case mBTC:
-        return QString("mBTC");
-    case uBTC:
-        return QString::fromUtf8("μBTC");
+    case BCH:
+        return QString("BCH");
+    case mBCH:
+        return QString("mBCH");
+    case XCH:
+        return QString("cash");
     default:
         return QString("???");
     }
@@ -51,12 +50,12 @@ QString BitcoinUnits::description(int unit)
 {
     switch (unit)
     {
-    case BTC:
+    case BCH:
         return QString("Bitcoins");
-    case mBTC:
+    case mBCH:
         return QString("Milli-Bitcoins (1 / 1" THIN_SP_UTF8 "000)");
-    case uBTC:
-        return QString("Micro-Bitcoins (1 / 1" THIN_SP_UTF8 "000" THIN_SP_UTF8 "000)");
+    case XCH:
+        return QString("Cash (1 / 1" THIN_SP_UTF8 "000" THIN_SP_UTF8 "000)");
     default:
         return QString("???");
     }
@@ -66,11 +65,11 @@ qint64 BitcoinUnits::factor(int unit)
 {
     switch (unit)
     {
-    case BTC:
+    case BCH:
         return 100000000;
-    case mBTC:
+    case mBCH:
         return 100000;
-    case uBTC:
+    case XCH:
         return 100;
     default:
         return 100000000;
@@ -81,11 +80,11 @@ int BitcoinUnits::decimals(int unit)
 {
     switch (unit)
     {
-    case BTC:
+    case BCH:
         return 8;
-    case mBTC:
+    case mBCH:
         return 5;
-    case uBTC:
+    case XCH:
         return 2;
     default:
         return 0;

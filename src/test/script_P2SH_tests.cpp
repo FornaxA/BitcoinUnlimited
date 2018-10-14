@@ -1,9 +1,10 @@
 // Copyright (c) 2012-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "script/script.h"
+#include "consensus/tx_verify.h"
 #include "key.h"
 #include "keystore.h"
 #include "parallel.h"
@@ -115,13 +116,8 @@ BOOST_AUTO_TEST_CASE(sign)
             txTo[i].vin[0].scriptSig = txTo[j].vin[0].scriptSig;
 
             const CTxOut &output = txFrom.vout[txTo[i].vin[0].prevout.n];
-#ifdef BITCOIN_CASH
             bool sigOK = CScriptCheck(nullptr, output.scriptPubKey, output.nValue, txTo[i], 0,
                 SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_STRICTENC | SCRIPT_ENABLE_SIGHASH_FORKID, false)();
-#else
-            bool sigOK = CScriptCheck(nullptr, output.scriptPubKey, output.nValue, txTo[i], 0,
-                SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_STRICTENC, false)();
-#endif
             if (i == j)
                 BOOST_CHECK_MESSAGE(sigOK, strprintf("VerifySignature %d %d", i, j));
             else

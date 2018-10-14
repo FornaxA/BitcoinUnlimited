@@ -1,5 +1,5 @@
 // Copyright (c) 2011-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -8,6 +8,7 @@
 #include "test/test_bitcoin.h"
 
 #include "clientversion.h"
+#include "consensus/tx_verify.h"
 #include "consensus/validation.h"
 #include "core_io.h"
 #include "key.h"
@@ -16,6 +17,7 @@
 #include "policy/policy.h"
 #include "script/script.h"
 #include "script/script_error.h"
+#include "test/scriptflags.h"
 #include "utilstrencodings.h"
 
 #include <map>
@@ -33,59 +35,6 @@ using namespace std;
 
 // In script_tests.cpp
 extern UniValue read_json(const std::string &jsondata);
-
-static std::map<string, unsigned int> mapFlagNames =
-    boost::assign::map_list_of(string("NONE"), (unsigned int)SCRIPT_VERIFY_NONE)(string("P2SH"),
-        (unsigned int)SCRIPT_VERIFY_P2SH)(string("STRICTENC"), (unsigned int)SCRIPT_VERIFY_STRICTENC)(string("DERSIG"),
-        (unsigned int)SCRIPT_VERIFY_DERSIG)(string("LOW_S"), (unsigned int)SCRIPT_VERIFY_LOW_S)(string("SIGPUSHONLY"),
-        (unsigned int)SCRIPT_VERIFY_SIGPUSHONLY)(string("MINIMALDATA"),
-        (unsigned int)SCRIPT_VERIFY_MINIMALDATA)(string("NULLDUMMY"), (unsigned int)SCRIPT_VERIFY_NULLDUMMY)(
-        string("DISCOURAGE_UPGRADABLE_NOPS"),
-        (unsigned int)SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_NOPS)(string("CLEANSTACK"),
-        (unsigned int)SCRIPT_VERIFY_CLEANSTACK)(string("NULLFAIL"), (unsigned int)SCRIPT_VERIFY_NULLFAIL)(
-        string("CHECKLOCKTIMEVERIFY"),
-        (unsigned int)SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY)(string("CHECKSEQUENCEVERIFY"),
-        (unsigned int)SCRIPT_VERIFY_CHECKSEQUENCEVERIFY)(std::string("SIGHASH_FORKID"),
-        (unsigned int)SCRIPT_ENABLE_SIGHASH_FORKID);
-
-unsigned int ParseScriptFlags(string strFlags)
-{
-    if (strFlags.empty())
-    {
-        return 0;
-    }
-    unsigned int flags = 0;
-    vector<string> words;
-    boost::algorithm::split(words, strFlags, boost::algorithm::is_any_of(","));
-
-    BOOST_FOREACH (string word, words)
-    {
-        if (!mapFlagNames.count(word))
-            BOOST_ERROR("Bad test: unknown verification flag '" << word << "'");
-        flags |= mapFlagNames[word];
-    }
-
-    return flags;
-}
-
-string FormatScriptFlags(unsigned int flags)
-{
-    if (flags == 0)
-    {
-        return "";
-    }
-    string ret;
-    std::map<string, unsigned int>::const_iterator it = mapFlagNames.begin();
-    while (it != mapFlagNames.end())
-    {
-        if (flags & it->second)
-        {
-            ret += it->first + ",";
-        }
-        it++;
-    }
-    return ret.substr(0, ret.size() - 1);
-}
 
 BOOST_FIXTURE_TEST_SUITE(transaction_tests, BasicTestingSetup)
 
@@ -190,7 +139,7 @@ BOOST_AUTO_TEST_CASE(tx_invalid)
     UniValue tests =
         read_json(std::string(json_tests::tx_invalid, json_tests::tx_invalid + sizeof(json_tests::tx_invalid)));
 
-    ScriptError err;
+    ScriptError err = SCRIPT_ERR_OK;
     for (unsigned int idx = 0; idx < tests.size(); idx++)
     {
         UniValue test = tests[idx];
@@ -385,43 +334,52 @@ BOOST_AUTO_TEST_CASE(test_IsStandard)
     string reason;
     BOOST_CHECK(IsStandardTx(t, reason));
 
-    // Check dust with default relay fee:
-    minRelayTxFee = CFeeRate(DEFAULT_MIN_RELAY_TX_FEE);
-    CAmount nDustThreshold = 182 * minRelayTxFee.GetFeePerK() / 1000 * 3;
-    BOOST_CHECK_EQUAL(nDustThreshold, 546);
+    // Check dust with default threshold:
+    nDustThreshold.Set(DEFAULT_DUST_THRESHOLD);
     // dust:
-    t.vout[0].nValue = nDustThreshold - 1;
+    t.vout[0].nValue = nDustThreshold.Value() - 1;
     BOOST_CHECK(!IsStandardTx(t, reason));
     // not dust:
-    t.vout[0].nValue = nDustThreshold;
+    t.vout[0].nValue = nDustThreshold.Value();
     BOOST_CHECK(IsStandardTx(t, reason));
 
-    // Check dust with odd relay fee to verify rounding:
-    // nDustThreshold = 182 * 1234 / 1000 * 3
-    minRelayTxFee = CFeeRate(1234);
+    // Check dust with odd threshold
+    nDustThreshold.Set(1234);
     // dust:
-    t.vout[0].nValue = 672 - 1;
+    t.vout[0].nValue = 1234 - 1;
     BOOST_CHECK(!IsStandardTx(t, reason));
     // not dust:
-    t.vout[0].nValue = 672;
+    t.vout[0].nValue = 1234;
     BOOST_CHECK(IsStandardTx(t, reason));
-    minRelayTxFee = CFeeRate(DEFAULT_MIN_RELAY_TX_FEE);
+    nDustThreshold.Set(DEFAULT_DUST_THRESHOLD);
 
     t.vout[0].scriptPubKey = CScript() << OP_1;
     BOOST_CHECK(!IsStandardTx(t, reason));
 
     // MAX_OP_RETURN_RELAY-byte TX_NULL_DATA (standard)
+    nMaxDatacarrierBytes = MAX_OP_RETURN_RELAY;
     t.vout[0].scriptPubKey = CScript() << OP_RETURN << ParseHex("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962"
                                                                 "e0ea1f61deb649f6bc3f4cef3804678afdb0fe5548271967f1a671"
-                                                                "30b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38");
+                                                                "e0ea1f61deb649f6bc3f4cef3804678afdb0fe5548271967f1a671"
+                                                                "04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962"
+                                                                "30b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38ce"
+                                                                "04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962"
+                                                                "30b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38ce"
+                                                                "30b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef7105"
+                                                                "2312acbd");
     BOOST_CHECK_EQUAL(MAX_OP_RETURN_RELAY, t.vout[0].scriptPubKey.size());
     BOOST_CHECK(IsStandardTx(t, reason));
 
     // MAX_OP_RETURN_RELAY+1-byte TX_NULL_DATA (non-standard)
-    t.vout[0].scriptPubKey =
-        CScript() << OP_RETURN
-                  << ParseHex("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef3804678afd"
-                              "b0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef3800");
+    t.vout[0].scriptPubKey = CScript() << OP_RETURN << ParseHex("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962"
+                                                                "e0ea1f61deb649f6bc3f4cef3804678afdb0fe5548271967f1a671"
+                                                                "e0ea1f61deb649f6bc3f4cef3804678afdb0fe5548271967f1a671"
+                                                                "04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962"
+                                                                "30b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38ce"
+                                                                "04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962"
+                                                                "30b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38ce"
+                                                                "30b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef7105"
+                                                                "2312acbdab");
     BOOST_CHECK_EQUAL(MAX_OP_RETURN_RELAY + 1, t.vout[0].scriptPubKey.size());
     BOOST_CHECK(!IsStandardTx(t, reason));
 

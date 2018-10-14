@@ -19,6 +19,21 @@
 static const size_t DBWRAPPER_PREALLOC_KEY_SIZE = 64;
 static const size_t DBWRAPPER_PREALLOC_VALUE_SIZE = 1024;
 
+// DBWrapper leveldb options that can be modified rather than using the defaults defined in GetDefaultOptions().
+struct COverrideOptions
+{
+    size_t max_file_size;
+    size_t block_size;
+    size_t write_buffer_size;
+
+    COverrideOptions()
+    {
+        max_file_size = 0;
+        block_size = 0;
+        write_buffer_size = 0;
+    }
+};
+
 class dbwrapper_error : public std::runtime_error
 {
 public:
@@ -184,7 +199,7 @@ class CDBWrapper
 {
     friend const std::vector<unsigned char> &dbwrapper_private::GetObfuscateKey(const CDBWrapper &w);
 
-private:
+protected:
     //! custom environment this database is using (may be nullptr in case of default environment)
     leveldb::Env *penv;
 
@@ -230,7 +245,8 @@ public:
         size_t nCacheSize,
         bool fMemory = false,
         bool fWipe = false,
-        bool obfuscate = false);
+        bool obfuscate = false,
+        COverrideOptions *pOverride = nullptr);
     ~CDBWrapper();
 
     template <typename K, typename V>
@@ -247,7 +263,7 @@ public:
         {
             if (status.IsNotFound())
                 return false;
-            LogPrintf("LevelDB read failure: %s\n", status.ToString());
+            LOGA("LevelDB read failure: %s\n", status.ToString());
             dbwrapper_private::HandleError(status);
         }
         try
@@ -285,7 +301,7 @@ public:
         {
             if (status.IsNotFound())
                 return false;
-            LogPrintf("LevelDB read failure: %s\n", status.ToString());
+            LOGA("LevelDB read failure: %s\n", status.ToString());
             dbwrapper_private::HandleError(status);
         }
         return true;
@@ -345,6 +361,27 @@ public:
         leveldb::Slice slKey1(ssKey1.data(), ssKey1.size());
         leveldb::Slice slKey2(ssKey2.data(), ssKey2.size());
         pdb->CompactRange(&slKey1, &slKey2);
+    }
+
+    /**
+     * Compact the entire database.
+     */
+    void Compact() const
+    {
+        // workaround for google/leveldb#227
+        // NULL batch means just wait for earlier writes to be done
+        leveldb::WriteBatch b;
+        pdb->Write(writeoptions, &b);
+        pdb->CompactRange(NULL, NULL);
+    }
+
+    /**
+     * Return the size of all write buffers.
+     */
+    size_t TotalWriteBufferSize() const
+    {
+        // There can be up to two write buffers so return the total
+        return options.write_buffer_size * 2;
     }
 };
 

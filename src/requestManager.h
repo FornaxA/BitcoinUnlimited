@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2016-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -26,8 +26,11 @@ successful receipt, "requester.Rejected(...)" to indicate a bad object (request 
 
 #ifndef REQUEST_MANAGER_H
 #define REQUEST_MANAGER_H
+
 #include "net.h"
+#include "nodestate.h"
 #include "stat.h"
+
 // When should I request a tx from someone else (in microseconds). cmdline/bitcoin.conf: -txretryinterval
 extern unsigned int txReqRetryInterval;
 extern unsigned int MIN_TX_REQUEST_RETRY_INTERVAL;
@@ -51,7 +54,7 @@ public:
     void clear(void)
     {
         requestCount = 0;
-        node = 0;
+        node = nullptr;
         desirability = 0;
     }
     bool operator<(const CNodeRequestData &rhs) const { return desirability < rhs.desirability; }
@@ -72,9 +75,6 @@ public:
     bool rateLimited;
     int64_t lastRequestTime; // In microseconds, 0 means no request
     unsigned int outstandingReqs;
-    // unsigned int receivingFrom;
-    // char    requestCount[MAX_AVAIL_FROM];
-    // CNode* availableFrom[MAX_AVAIL_FROM];
     ObjectSourceList availableFrom;
     unsigned int priority;
 
@@ -89,9 +89,33 @@ public:
     bool AddSource(CNode *from); // returns true if the source did not already exist
 };
 
+// The following structs are used for tracking the internal requestmanager nodestate.
+struct QueuedBlock
+{
+    uint256 hash;
+    int64_t nTime; //! Time of "getdata" request in microseconds.
+};
+struct CRequestManagerNodeState
+{
+    // An ordered list of blocks currently in flight.  We could use mapBlocksInFlight to get the same
+    // data but then we'd have to iterate through the entire map to find what we're looking for.
+    std::list<QueuedBlock> vBlocksInFlight;
+
+    // When the first entry in vBlocksInFlight started downloading. Don't care when vBlocksInFlight is empty.
+    int64_t nDownloadingSince;
+
+    // How many blocks are currently in flight and requested by this node.
+    int nBlocksInFlight;
+
+    CRequestManagerNodeState();
+};
+
 class CRequestManager
 {
 protected:
+#ifdef ENABLE_MUTRACE
+    friend class CPrintSomePointers;
+#endif
 #ifdef DEBUG
     friend UniValue getstructuresizes(const UniValue &params, bool fHelp);
 #endif
@@ -100,13 +124,14 @@ protected:
     typedef std::map<uint256, CUnknownObj> OdMap;
     OdMap mapTxnInfo;
     OdMap mapBlkInfo;
-    CCriticalSection cs_objDownloader; // protects mapTxnInfo and mapBlkInfo
+    std::map<uint256, std::map<NodeId, std::list<QueuedBlock>::iterator> > mapBlocksInFlight;
+    std::map<NodeId, CRequestManagerNodeState> mapRequestManagerNodeState;
+    CCriticalSection cs_objDownloader; // protects mapTxnInfo, mapBlkInfo and mapBlocksInFlight
 
     OdMap::iterator sendIter;
     OdMap::iterator sendBlkIter;
 
     int inFlight;
-    // int maxInFlight;
     CStatHistory<int> inFlightTxns;
     CStatHistory<int> receivedTxns;
     CStatHistory<int> rejectedTxns;
@@ -115,10 +140,21 @@ protected:
 
     void cleanup(OdMap::iterator &item);
     CLeakyBucket requestPacer;
-    CLeakyBucket blockPacer;
+
+    // Request a single block.
+    bool RequestBlock(CNode *pfrom, CInv obj);
 
 public:
     CRequestManager();
+
+    // How many outbound nodes are we connected to.
+    std::atomic<int32_t> nOutbound;
+
+    /** Size of the "block download window": how far ahead of our current height do we fetch?
+     *  Larger windows tolerate larger download speed differences between peer, but increase the potential
+     *  degree of disordering of blocks on disk (which make reindexing and in the future perhaps pruning
+     *  harder). We'll probably want to make this a per-peer adaptive value at some point. */
+    std::atomic<unsigned int> BLOCK_DOWNLOAD_WINDOW{1024};
 
     // Get this object from somewhere, asynchronously.
     void AskFor(const CInv &obj, CNode *from, unsigned int priority = 0);
@@ -126,19 +162,67 @@ public:
     // Get these objects from somewhere, asynchronously.
     void AskFor(const std::vector<CInv> &objArray, CNode *from, unsigned int priority = 0);
 
+    // Get these objects from somewhere, asynchronously during IBD. During IBD we must assume every peer connected
+    // can give us the blocks we need and so we tell the request manager about these sources. Otherwise the request
+    // manager may not be able to re-request blocks from anyone after a timeout and we also need to be able to not
+    // request another group of blocks that are already in flight.
+    void AskForDuringIBD(const std::vector<CInv> &objArray, CNode *from, unsigned int priority = 0);
+
+    // Did we already ask for this block. We need to do this during IBD to make sure we don't ask for another set
+    // of the same blocks.
+    bool AlreadyAskedForBlock(const uint256 &hash);
+
     // Indicate that we got this object, from and bytes are optional (for node performance tracking)
     void Received(const CInv &obj, CNode *from, int bytes = 0);
 
     // Indicate that we previously got this object
-    void AlreadyReceived(const CInv &obj);
+    void AlreadyReceived(CNode *pnode, const CInv &obj);
 
     // Indicate that getting this object was rejected
     void Rejected(const CInv &obj, CNode *from, unsigned char reason = 0);
 
+    // Resets the last request time to zero when a node disconnects and has blocks in flight.
+    void ResetLastBlockRequestTime(const uint256 &hash);
+
     void SendRequests();
 
-    // Indicates whether a node ping time is acceptable relative to the overall average of all nodes.
-    bool IsNodePingAcceptable(CNode *pnode);
+    // Check whether the last unknown block a peer advertised is not yet known.
+    void ProcessBlockAvailability(NodeId nodeid);
+
+    // Update tracking information about which blocks a peer is assumed to have.
+    void UpdateBlockAvailability(NodeId nodeid, const uint256 &hash);
+
+    // Request the next blocks. Mostly this will get exucuted during IBD but sometimes even
+    // when the chain is syncd a block will get request via this method.
+    void RequestNextBlocksToDownload(CNode *pto);
+
+    // This gets called from RequestNextBlocksToDownload
+    void FindNextBlocksToDownload(CNode *node, unsigned int count, std::vector<CBlockIndex *> &vBlocks);
+
+    // Returns a bool indicating whether we requested this block.
+    void MarkBlockAsInFlight(NodeId nodeid, const uint256 &hash);
+
+    // Returns a bool if successful in indicating we received this block.
+    bool MarkBlockAsReceived(const uint256 &hash, CNode *pnode);
+
+    // Methods for handling mapBlocksInFlight which is protected.
+    void MapBlocksInFlightErase(const uint256 &hash, NodeId nodeid);
+    bool MapBlocksInFlightEmpty();
+    void MapBlocksInFlightClear();
+
+    // Methods for handling mapRequestManagerNodeState which is protected.
+    void GetBlocksInFlight(std::vector<uint256> &vBlocksInFlight, NodeId nodeid);
+    int GetNumBlocksInFlight(NodeId nodeid);
+
+    // Remove a request manager node from the nodestate map.
+    void RemoveNodeState(NodeId nodeid)
+    {
+        LOCK(cs_objDownloader);
+        mapRequestManagerNodeState.erase(nodeid);
+    }
+
+    // Check for block download timeout and disconnect node if necessary.
+    void DisconnectOnDownloadTimeout(CNode *pnode, const Consensus::Params &consensusParams, int64_t nNow);
 };
 
 

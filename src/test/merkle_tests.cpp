@@ -4,8 +4,8 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "consensus/merkle.h"
-#include "random.h"
 #include "test/test_bitcoin.h"
+#include "test/test_random.h"
 
 #include <boost/test/unit_test.hpp>
 
@@ -16,8 +16,8 @@ static uint256 BlockBuildMerkleTree(const CBlock &block, bool *fMutated, std::ve
 {
     vMerkleTree.clear();
     vMerkleTree.reserve(block.vtx.size() * 2 + 16); // Safe upper bound for the number of total nodes.
-    for (std::vector<CTransaction>::const_iterator it(block.vtx.begin()); it != block.vtx.end(); ++it)
-        vMerkleTree.push_back(it->GetHash());
+    for (std::vector<CTransactionRef>::const_iterator it(block.vtx.begin()); it != block.vtx.end(); ++it)
+        vMerkleTree.push_back((*it)->GetHash());
     int j = 0;
     bool mutated = false;
     for (int nSize = block.vtx.size(); nSize > 1; nSize = (nSize + 1) / 2)
@@ -72,8 +72,56 @@ static inline int ctz(uint32_t i)
     return j;
 }
 
+
+static uint256 ComputeRootFromCoinbaseProof(const uint256 &elem, const std::vector<uint256> &leaves)
+{
+    uint256 running = elem;
+    for (auto &hash : leaves)
+    {
+        uint256 result;
+        CHash256().Write(running.begin(), 32).Write(hash.begin(), 32).Finalize(result.begin());
+        running = result;
+    }
+    return running;
+}
+
+
 BOOST_AUTO_TEST_CASE(merkle_test)
 {
+    // Test the merkle proof code exhaustively for element 0 (coinbase), since this is used when communicating
+    // mining block headers to mining pools.
+    unsigned int MAX_LEAVES = 100000;
+    unsigned int MAX_TRIES = 20;
+
+    std::vector<uint256> leafData;
+    leafData.reserve(MAX_LEAVES);
+
+    for (unsigned int i = 0; i < MAX_LEAVES; i++)
+    {
+        // add a random leaf
+        uint256 temp;
+        for (uint32_t j = 0; j < 32; j++)
+            *(temp.begin() + j) = insecure_rand() & 255;
+        leafData.push_back(temp);
+    }
+
+    for (unsigned int i = 0; i < MAX_TRIES; i++)
+    {
+        uint32_t size = insecure_rand() % MAX_LEAVES;
+        std::vector<uint256> leaves = leafData;
+        leaves.resize(size);
+
+        uint256 root = ComputeMerkleRoot(leaves);
+        std::vector<uint256> mklProof = ComputeMerkleBranch(leaves, 0);
+
+        // Test 2 ways of doing it
+        uint256 r1 = ComputeMerkleRootFromBranch(leaves[0], mklProof, 0);
+        uint256 r2 = ComputeRootFromCoinbaseProof(leaves[0], mklProof);
+
+        BOOST_CHECK(root == r1);
+        BOOST_CHECK(root == r2);
+    }
+
     for (int i = 0; i < 32; i++)
     {
         // Try 32 block sizes: all sizes from 0 to 16 inclusive, and then 15 random sizes.
@@ -101,7 +149,7 @@ BOOST_AUTO_TEST_CASE(merkle_test)
             {
                 CMutableTransaction mtx;
                 mtx.nLockTime = j;
-                block.vtx[j] = mtx;
+                block.vtx[j] = MakeTransactionRef(std::move(mtx));
             }
             // Compute the root of the block before mutating it.
             bool unmutatedMutated = false;
@@ -147,7 +195,7 @@ BOOST_AUTO_TEST_CASE(merkle_test)
                     std::vector<uint256> newBranch = BlockMerkleBranch(block, mtx);
                     std::vector<uint256> oldBranch = BlockGetMerkleBranch(block, merkleTree, mtx);
                     BOOST_CHECK(oldBranch == newBranch);
-                    BOOST_CHECK(ComputeMerkleRootFromBranch(block.vtx[mtx].GetHash(), newBranch, mtx) == oldRoot);
+                    BOOST_CHECK(ComputeMerkleRootFromBranch(block.vtx[mtx]->GetHash(), newBranch, mtx) == oldRoot);
                 }
             }
         }

@@ -1,11 +1,11 @@
 // Copyright (c) 2014 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "winshutdownmonitor.h"
 
-#if defined(Q_OS_WIN) && QT_VERSION >= 0x050000
+#if defined(Q_OS_WIN)
 #include "init.h"
 #include "util.h"
 
@@ -30,7 +30,7 @@ bool WinShutdownMonitor::nativeEventFilter(const QByteArray &eventType, void *pM
         static bool warned = false;
         if (!warned)
         {
-            LogPrintf("%s: OpenSSL RAND_event() failed to seed OpenSSL PRNG with enough data.\n", __func__);
+            LOGA("%s: OpenSSL RAND_event() failed to seed OpenSSL PRNG with enough data.\n", __func__);
             warned = true;
         }
     }

@@ -1,5 +1,5 @@
 // Copyright (c) 2011-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -26,8 +26,6 @@
 #include <QIcon>
 #include <QList>
 
-#include <boost/foreach.hpp>
-
 // Amount column is right-aligned it contains numbers
 static int column_alignments[] = {
     Qt::AlignLeft | Qt::AlignVCenter, /* status */
@@ -50,7 +48,7 @@ struct TxLessThan
 class TransactionTablePriv
 {
 public:
-    TransactionTablePriv(CWallet *wallet, TransactionTableModel *parent) : wallet(wallet), parent(parent) {}
+    TransactionTablePriv(CWallet *_wallet, TransactionTableModel *_parent) : wallet(_wallet), parent(_parent) {}
     CWallet *wallet;
     TransactionTableModel *parent;
 
@@ -221,9 +219,9 @@ public:
     }
 };
 
-TransactionTableModel::TransactionTableModel(const PlatformStyle *platformStyle, CWallet *wallet, WalletModel *parent)
-    : QAbstractTableModel(parent), wallet(wallet), walletModel(parent), priv(new TransactionTablePriv(wallet, this)),
-      fProcessingQueuedTransactions(false), platformStyle(platformStyle)
+TransactionTableModel::TransactionTableModel(const PlatformStyle *_platformStyle, CWallet *_wallet, WalletModel *parent)
+    : QAbstractTableModel(parent), wallet(_wallet), walletModel(parent), priv(new TransactionTablePriv(wallet, this)),
+      fProcessingQueuedTransactions(false), platformStyle(_platformStyle)
 {
     columns << QString() << QString() << tr("Date") << tr("Type") << tr("Address or Label")
             << BitcoinUnits::getAmountColumnTitle(walletModel->getOptionsModel()->getDisplayUnit());
@@ -408,7 +406,7 @@ QString TransactionTableModel::formatTxToAddress(const TransactionRecord *wtx, b
 
     /* Get all the addresses so the user can filter for any of them */
     std::string addressList = "";
-    BOOST_FOREACH (const PAIRTYPE(std::string, CScript) & addr, wtx->addresses)
+    for (const std::pair<std::string, CScript> &addr : wtx->addresses)
     {
         std::string nextAddress = boost::replace_all_copy(addr.first, "\n", " ");
         // ensure list isn't prefixed by a space
@@ -421,7 +419,7 @@ QString TransactionTableModel::formatTxToAddress(const TransactionRecord *wtx, b
     if (label == "")
         return QString::fromStdString(addressList) + watchAddress;
     else
-        return label + " " + QString::fromStdString(addressList) + watchAddress;
+        return label + watchAddress;
 }
 
 QVariant TransactionTableModel::addressColor(const TransactionRecord *wtx) const
@@ -433,8 +431,10 @@ QVariant TransactionTableModel::addressColor(const TransactionRecord *wtx) const
     case TransactionRecord::SendToAddress:
     case TransactionRecord::Generated:
     {
-        QString label =
-            walletModel->getAddressTableModel()->labelForAddress(QString::fromStdString(wtx->addresses.begin()->first));
+        auto firstAddr = wtx->addresses.begin();
+        if (firstAddr == wtx->addresses.end())
+            return COLOR_BAREADDRESS;
+        QString label = walletModel->getAddressTableModel()->labelForAddress(QString::fromStdString(firstAddr->first));
         if (label.isEmpty())
             return COLOR_BAREADDRESS;
     }
@@ -529,7 +529,7 @@ QString TransactionTableModel::pickLabelWithAddress(AddressList listAddresses, s
 {
     /* returns the first address wiith a label or the last address on the list */
     QString label = "";
-    BOOST_FOREACH (const PAIRTYPE(std::string, CScript) & addr, listAddresses)
+    for (const std::pair<std::string, CScript> &addr : listAddresses)
     {
         address = addr.first;
         label = walletModel->getAddressTableModel()->labelForAddress(QString::fromStdString(address));
@@ -630,7 +630,7 @@ QVariant TransactionTableModel::data(const QModelIndex &index, int role) const
         return priv->describe(rec, walletModel->getOptionsModel()->getDisplayUnit(),
             walletModel->getAddressTableModel()->labelForFreeze(QString::fromStdString(address)));
     case AddressRole:
-        return formatTxToAddress(rec, false);
+        return QString::fromStdString(address);
     case LabelRole:
         return label;
     case AmountRole:
@@ -709,8 +709,8 @@ struct TransactionNotification
 {
 public:
     TransactionNotification() {}
-    TransactionNotification(uint256 hash, ChangeType status, bool showTransaction)
-        : hash(hash), status(status), showTransaction(showTransaction)
+    TransactionNotification(uint256 _hash, ChangeType _status, bool _showTransaction)
+        : hash(_hash), status(_status), showTransaction(_showTransaction)
     {
     }
 

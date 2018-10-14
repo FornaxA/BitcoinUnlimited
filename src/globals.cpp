@@ -16,6 +16,7 @@
 #include "consensus/params.h"
 #include "consensus/validation.h"
 #include "dosman.h"
+#include "graphene.h"
 #include "leakybucket.h"
 #include "main.h"
 #include "miner.h"
@@ -25,12 +26,14 @@
 #include "primitives/block.h"
 #include "requestManager.h"
 #include "rpc/server.h"
+#include "script/standard.h"
 #include "stat.h"
 #include "thinblock.h"
 #include "timedata.h"
 #include "tinyformat.h"
 #include "tweak.h"
 #include "txmempool.h"
+#include "txorphanpool.h"
 #include "ui_interface.h"
 #include "util.h"
 #include "utilstrencodings.h"
@@ -38,7 +41,6 @@
 #include "version.h"
 
 #include <atomic>
-#include <boost/foreach.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/thread.hpp>
 #include <inttypes.h>
@@ -54,13 +56,12 @@ std::map<std::pair<void *, void *>, LockStack> lockorders;
 boost::thread_specific_ptr<LockStack> lockstack;
 #endif
 
+// this flag is set to true when a wallet rescan has been invoked.
+std::atomic<bool> fRescan{false};
 
-std::atomic<bool> fIsInitialBlockDownload{false};
-std::atomic<bool> fRescan{false}; // this flag is set to true when a wallet rescan has been invoked.
-
+CStatusString statusStrings;
 // main.cpp CriticalSections:
 CCriticalSection cs_LastBlockFile;
-CCriticalSection cs_nBlockSequenceId;
 
 CCriticalSection cs_nTimeOffset;
 int64_t nTimeOffset = 0;
@@ -68,8 +69,73 @@ int64_t nTimeOffset = 0;
 CCriticalSection cs_rpcWarmup;
 
 CCriticalSection cs_main;
-BlockMap mapBlockIndex;
-CChain chainActive;
+BlockMap mapBlockIndex GUARDED_BY(cs_main);
+CChain chainActive GUARDED_BY(cs_main);
+std::map<NodeId, CNodeState> mapNodeState GUARDED_BY(cs_main); // nodestate.h
+// BU variables moved to globals.cpp
+// - moved CCriticalSection cs_main;
+// - moved BlockMap mapBlockIndex;
+// - movedCChain chainActive;
+CBlockIndex *pindexBestHeader GUARDED_BY(cs_main) = nullptr;
+CFeeRate minRelayTxFee GUARDED_BY(cs_main) = CFeeRate(DEFAULT_MIN_RELAY_TX_FEE);
+// The allowed size of the in memory UTXO cache
+int64_t nCoinCacheMaxSize GUARDED_BY(cs_main) = 0;
+/** A cache to store headers that have arrived but can not yet be connected **/
+std::map<uint256, std::pair<CBlockHeader, int64_t> > mapUnConnectedHeaders GUARDED_BY(cs_main);
+CBlockIndex *pindexBestInvalid GUARDED_BY(cs_main) = nullptr;
+/**
+ * Every received block is assigned a unique and increasing identifier, so we
+ * know which one to give priority in case of a fork.
+ */
+/** Blocks loaded from disk are assigned id 0, so start the counter at 1. */
+uint64_t nBlockSequenceId GUARDED_BY(cs_main) = 1;
+/**
+ * Sources of received blocks, saved to be able to send them reject
+ * messages or ban them when processing happens afterwards. Protected by
+ * cs_main.
+ */
+std::map<uint256, NodeId> mapBlockSource GUARDED_BY(cs_main);
+/** Dirty block file entries. */
+std::set<int> setDirtyFileInfo GUARDED_BY(cs_main);
+/** Dirty block index entries. */
+std::set<CBlockIndex *> setDirtyBlockIndex GUARDED_BY(cs_main);
+
+CCriticalSection cs_recentRejects;
+/**
+ * Filter for transactions that were recently rejected by
+ * AcceptToMemoryPool. These are not rerequested until the chain tip
+ * changes, at which point the entire filter is reset. Protected by
+ * cs_main.
+ *
+ * Without this filter we'd be re-requesting txs from each of our peers,
+ * increasing bandwidth consumption considerably. For instance, with 100
+ * peers, half of which relay a tx we don't accept, that might be a 50x
+ * bandwidth increase. A flooding attacker attempting to roll-over the
+ * filter using minimum-sized, 60byte, transactions might manage to send
+ * 1000/sec if we have fast peers, so we pick 120,000 to give our peers a
+ * two minute window to send invs to us.
+ *
+ * Decreasing the false positive rate is fairly cheap, so we pick one in a
+ * million to make it highly unlikely for users to have issues with this
+ * filter.
+ *
+ * Memory used: 1.7MB
+ */
+std::unique_ptr<CRollingBloomFilter> recentRejects GUARDED_BY(cs_recentRejects);
+
+/**
+ * Keep track of transaction which were recently in a block and don't
+ * request those again.
+ *
+ * Note that we dont actually ever clear this - in cases of reorgs where
+ * transactions dropped out they were either added back to our mempool
+ * or fell out due to size limitations (in which case we'll get them again
+ * if the user really cares and re-sends).
+ *
+ * Protected by cs_recentRejects.
+ */
+std::unique_ptr<CRollingBloomFilter> txn_recently_in_block GUARDED_BY(cs_recentRejects);
+
 CWaitableCriticalSection csBestBlock;
 CConditionVariable cvBlockChange;
 
@@ -77,13 +143,11 @@ proxyType proxyInfo[NET_MAX];
 proxyType nameProxy;
 CCriticalSection cs_proxyInfos;
 
-// moved from main.cpp (now part of nodestate.h)
-std::map<uint256, pair<NodeId, std::list<QueuedBlock>::iterator> > mapBlocksInFlight;
-std::map<NodeId, CNodeState> mapNodeState;
 
-set<uint256> setPreVerifiedTxHash;
-set<uint256> setUnVerifiedOrphanTxHash;
 CCriticalSection cs_xval;
+set<uint256> setPreVerifiedTxHash GUARDED_BY(cs_xval);
+set<uint256> setUnVerifiedOrphanTxHash GUARDED_BY(cs_xval);
+
 CCriticalSection cs_vNodes;
 CCriticalSection cs_mapLocalHost;
 map<CNetAddr, LocalServiceInfo> mapLocalHost;
@@ -107,7 +171,7 @@ vector<std::string> vUseDNSSeeds;
 vector<std::string> vAddedNodes;
 set<CNetAddr> setservAddNodeAddresses;
 
-uint64_t maxGeneratedBlock = DEFAULT_MAX_GENERATED_BLOCK_SIZE;
+uint64_t maxGeneratedBlock = DEFAULT_BLOCK_MAX_SIZE;
 uint64_t excessiveBlockSize = DEFAULT_EXCESSIVE_BLOCK_SIZE;
 unsigned int excessiveAcceptDepth = DEFAULT_EXCESSIVE_ACCEPT_DEPTH;
 unsigned int maxMessageSizeMultiplier = DEFAULT_MAX_MESSAGE_SIZE_MULTIPLIER;
@@ -128,6 +192,7 @@ int operateSampleCount[] = {30, 12, 24, 30};
 int interruptIntervals[] = {30, 30 * 12, 30 * 12 * 24, 30 * 12 * 24 * 30};
 
 CTxMemPool mempool(::minRelayTxFee);
+CTxOrphanPool orphanpool;
 
 std::chrono::milliseconds statMinInterval(10000);
 boost::asio::io_service stat_io_service;
@@ -136,10 +201,9 @@ std::list<CStatBase *> mallocedStats;
 CStatMap statistics;
 CTweakMap tweaks;
 
-map<CInv, CDataStream> mapRelay;
+map<CInv, CTransactionRef> mapRelay;
 deque<pair<int64_t, CInv> > vRelayExpiration;
 CCriticalSection cs_mapRelay;
-limitedmap<uint256, int64_t> mapAlreadyAskedFor(MAX_INV_SZ);
 
 vector<CNode *> vNodes;
 list<CNode *> vNodesDisconnected;
@@ -149,11 +213,9 @@ CNodeSignals g_signals;
 CAddrMan addrman;
 CDoSManager dosMan;
 
-// BU: change locking of orphan map from using cs_main to cs_orphancache.  There is too much dependance on cs_main locks
-// which are generally too broad in scope.
-CCriticalSection cs_orphancache;
-map<uint256, COrphanTx> mapOrphanTransactions GUARDED_BY(cs_orphancache);
-map<uint256, set<uint256> > mapOrphanTransactionsByPrev GUARDED_BY(cs_orphancache);
+CTweak<uint64_t> pruneIntervalTweak("prune.pruneInterval",
+    "How much block data (in MiB) is written to disk before trying to prune our block storage",
+    DEFAULT_PRUNE_INTERVAL);
 
 CTweakRef<uint64_t> ebTweak("net.excessiveBlock",
     "Excessive block size in bytes",
@@ -174,24 +236,14 @@ CTweakRef<uint64_t> miningBlockSize("mining.blockSize",
     "mining.coinbaseReserve.",
     &maxGeneratedBlock,
     &MiningBlockSizeValidator);
+CTweakRef<unsigned int> maxDataCarrierTweak("mining.dataCarrierSize",
+    "Maximum size of OP_RETURN data script in bytes.",
+    &nMaxDatacarrierBytes,
+    &MaxDataCarrierValidator);
 
-#ifdef BITCOIN_CASH
-CTweak<uint64_t> miningForkTime("mining.forkTime",
-    "Time in seconds since the epoch to initiate a hard fork as per BUIP055.",
-    1501590000); // Tue 1 Aug 2017 12:20:00 UTC, uahf-technical-spec.md REQ-2
-CTweak<bool> onlyAcceptForkSig("net.onlyRelayForkSig",
-    "Once the fork occurs, only relay transactions signed using the new signature scheme",
-    true);
-
-#else
-CTweak<uint64_t> miningForkTime("mining.forkTime",
-    "Time in seconds since the epoch to initiate a hard fork as per BUIP055.",
-    0);
-CTweak<bool> onlyAcceptForkSig("net.onlyRelayForkSig",
-    "Once the fork occurs, only accept transactions signed using the new signature scheme",
-    false);
-
-#endif
+CTweak<uint64_t> miningForkTime("mining.forkMay2018Time",
+    "Time in seconds since the epoch to initiate a hard fork scheduled on 15th May 2018.",
+    1526400000); // Tue 15 May 2018 16:00:00 UTC
 
 CTweak<bool> unsafeGetBlockTemplate("mining.unsafeGetBlockTemplate",
     "Allow getblocktemplate to succeed even if the chain tip is old or this node is not connected to other nodes",
@@ -199,10 +251,10 @@ CTweak<bool> unsafeGetBlockTemplate("mining.unsafeGetBlockTemplate",
 
 CTweak<uint64_t> miningForkEB("mining.forkExcessiveBlock",
     "Set the excessive block to this value at the time of the fork.",
-    8000000); // 8MB, uahf-technical-spec.md REQ-4-1
+    32000000); // May2018 HF proposed max block size
 CTweak<uint64_t> miningForkMG("mining.forkBlockSize",
     "Set the maximum block generation size to this value at the time of the fork.",
-    2000000); // 2MB, uahf-technical-spec.md REQ-4-2
+    8000000);
 
 CTweak<bool> walletSignWithForkSig("wallet.useNewSig",
     "Once the fork occurs, sign transactions using the new signature scheme so that they will only be valid on the "
@@ -212,7 +264,8 @@ CTweak<bool> walletSignWithForkSig("wallet.useNewSig",
 CTweak<unsigned int> maxTxSize("net.excessiveTx", "Largest transaction size in bytes", DEFAULT_LARGEST_TRANSACTION);
 CTweakRef<unsigned int> eadTweak("net.excessiveAcceptDepth",
     "Excessive block chain acceptance depth in blocks",
-    &excessiveAcceptDepth);
+    &excessiveAcceptDepth,
+    &AcceptDepthValidator);
 CTweakRef<int> maxOutConnectionsTweak("net.maxOutboundConnections",
     "Maximum number of outbound connections",
     &nMaxOutConnections,
@@ -221,9 +274,6 @@ CTweakRef<int> maxConnectionsTweak("net.maxConnections", "Maximum number of conn
 CTweakRef<int> minXthinNodesTweak("net.minXthinNodes",
     "Minimum number of outbound xthin capable nodes to connect to",
     &nMinXthinNodes);
-CTweakRef<int> minBitcoinCashNodesTweak("net.minBitcoinCashNodes",
-    "Minimum number of outbound BitcoinCash capable nodes to connect to",
-    &nMinBitcoinCashNodes);
 // When should I request a tx from someone else (in microseconds). cmdline/bitcoin.conf: -txretryinterval
 CTweakRef<unsigned int> triTweak("net.txRetryInterval",
     "How long to wait in microseconds before requesting a transaction from another source",
@@ -237,6 +287,10 @@ CTweakRef<std::string> subverOverrideTweak("net.subversionOverride",
     "If set, this field will override the normal subversion field.  This is useful if you need to hide your node.",
     &subverOverride,
     &SubverValidator);
+
+CTweakRef<bool> enableDataSigVerifyTweak("consensus.enableDataSigVerify",
+    "true if OP_DATASIGVERIFY is enabled.",
+    &enableDataSigVerify);
 
 CTweak<CAmount> maxTxFee("wallet.maxTxFee",
     "Maximum total fees to use in a single wallet transaction or raw transaction; setting this too low may abort large "
@@ -275,6 +329,22 @@ CTweak<uint64_t> checkScriptDays("blockchain.checkScriptDays",
     "The number of days in the past we check scripts during initial block download.",
     DEFAULT_CHECKPOINT_DAYS);
 
+/** Dust Threshold (in satoshis) defines the minimum quantity an output may contain for the
+    transaction to be considered standard, and therefore relayable.
+ */
+CTweak<unsigned int> nDustThreshold("net.dustThreshold", "Dust Threshold (in satoshis).", DEFAULT_DUST_THRESHOLD);
+
+/** The maxlimitertxfee (in satoshi's per byte) */
+CTweak<double> dMaxLimiterTxFee("maxlimitertxfee",
+    strprintf("Fees (in satoshi/byte) larger than this are always relayed (default: %.4f)", DEFAULT_MAXLIMITERTXFEE),
+    DEFAULT_MAXLIMITERTXFEE);
+
+/** The minlimitertxfee (in satoshi's per byte) */
+CTweak<double> dMinLimiterTxFee("minlimitertxfee",
+    strprintf("Fees (in satoshi/byte) smaller than this are considered "
+              "zero fee and subject to -limitfreerelay (default: %.4f)",
+                                    DEFAULT_MINLIMITERTXFEE),
+    DEFAULT_MINLIMITERTXFEE);
 
 CRequestManager requester; // after the maps nodes and tweaks
 
@@ -287,5 +357,47 @@ CCriticalSection cs_blockvalidationtime;
 CStatHistory<uint64_t> nBlockValidationTime("blockValidationTime", STAT_OP_MAX | STAT_INDIVIDUAL);
 
 CThinBlockData thindata; // Singleton class
+CGrapheneBlockData graphenedata; // Singleton class
 
 uint256 bitcoinCashForkBlockHash = uint256S("000000000000000000651ef99cb9fcbe0dadde1d424bd9f15ff20136191a5eec");
+
+map<int64_t, CMiningCandidate> miningCandidatesMap GUARDED_BY(cs_main);
+
+#ifdef ENABLE_MUTRACE
+class CPrintSomePointers
+{
+public:
+    CPrintSomePointers()
+    {
+        printf("csBestBlock %p\n", &csBestBlock);
+        printf("cvBlockChange %p\n", &cvBlockChange);
+        printf("cs_LastBlockFile %p\n", &cs_LastBlockFile);
+        printf("cs_nTimeOffset %p\n", &cs_nTimeOffset);
+        printf("cs_rpcWarmup %p\n", &cs_rpcWarmup);
+        printf("cs_main %p\n", &cs_main);
+        printf("csBestBlock %p\n", &csBestBlock);
+        printf("cs_proxyInfos %p\n", &cs_proxyInfos);
+        printf("cs_xval %p\n", &cs_xval);
+        printf("cs_vNodes %p\n", &cs_vNodes);
+        printf("cs_mapLocalHost %p\n", &cs_mapLocalHost);
+        printf("CNode::cs_totalBytesRecv %p\n", &CNode::cs_totalBytesRecv);
+        printf("CNode::cs_totalBytesSent %p\n", &CNode::cs_totalBytesSent);
+
+        // critical sections from net.cpp
+        printf("cs_setservAddNodeAddresses %p\n", &cs_setservAddNodeAddresses);
+        printf("cs_vAddedNodes %p\n", &cs_vAddedNodes);
+        printf("cs_vUseDNSSeeds %p\n", &cs_vUseDNSSeeds);
+        printf("cs_mapInboundConnectionTracker %p\n", &cs_mapInboundConnectionTracker);
+        printf("cs_vOneShots %p\n", &cs_vOneShots);
+
+        printf("cs_statMap %p\n", &cs_statMap);
+
+        printf("requester.cs_objDownloader %p\n", &requester.cs_objDownloader);
+
+        printf("\nCondition variables:\n");
+        printf("cvBlockChange %p\n", &cvBlockChange);
+    }
+};
+
+static CPrintSomePointers unused;
+#endif

@@ -1,5 +1,5 @@
 // Copyright (c) 2011-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -19,6 +19,8 @@
 
 class QValidatedLineEdit;
 class SendCoinsRecipient;
+class CChainParams;
+class Config;
 
 QT_BEGIN_NAMESPACE
 class QAbstractItemView;
@@ -40,14 +42,22 @@ QString dateTimeStr(qint64 nTime);
 // Return a monospace font
 QFont fixedPitchFont();
 
+// Generate an invalid, but convincing address.
+std::string DummyAddress(const CChainParams &params, const Config &cfg);
+
 // Set up widgets for address and amounts
 void setupAddressWidget(QValidatedLineEdit *widget, QWidget *parent);
 void setupAmountWidget(QLineEdit *widget, QWidget *parent);
 
-// Parse "bitcoin:" URI into recipient object, return true on successful parsing
-bool parseBitcoinURI(const QUrl &uri, SendCoinsRecipient *out);
-bool parseBitcoinURI(QString uri, SendCoinsRecipient *out);
-QString formatBitcoinURI(const SendCoinsRecipient &info);
+QString bitcoinURIScheme(const CChainParams &, bool useCashAddr);
+QString bitcoinURIScheme(const Config &);
+// Parse "bitcoincash:" URI into recipient object, return true on successful
+// parsing
+bool parseBitcoinURI(const QString &scheme, const QUrl &uri, SendCoinsRecipient *out);
+bool parseBitcoinURI(const QString &scheme, QString uri, SendCoinsRecipient *out);
+QString formatBitcoinURI(const Config &cfg, const SendCoinsRecipient &info);
+
+QString uriPrefix();
 
 // Returns true if given address+amount meets "dust" definition
 bool isDust(const QString &address, const CAmount &amount);
@@ -154,7 +164,10 @@ class TableViewLastColumnResizingFixer : public QObject
     Q_OBJECT
 
 public:
-    TableViewLastColumnResizingFixer(QTableView *table, int lastColMinimumWidth, int allColsMinimumWidth);
+    TableViewLastColumnResizingFixer(QTableView *table,
+        int lastColMinimumWidth,
+        int allColsMinimumWidth,
+        QObject *parent);
     void stretchColumnWidth(int column);
 
 private:
@@ -204,7 +217,7 @@ QString formatPingTime(double dPingTime);
 /* Format a CNodeCombinedStats.nTimeOffset into a user-readable string. */
 QString formatTimeOffset(int64_t nTimeOffset);
 
-#if defined(Q_OS_MAC) && QT_VERSION >= 0x050000
+#if defined(Q_OS_MAC)
 // workaround for Qt OSX Bug:
 // https://bugreports.qt-project.org/browse/QTBUG-15631
 // QProgressBar uses around 10% CPU even when app is in background

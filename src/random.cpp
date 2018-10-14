@@ -1,6 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -11,7 +11,7 @@
 #include "compat.h" // for Windows API
 #endif
 #include "serialize.h" // for begin_ptr(vec)
-#include "util.h" // for LogPrint()
+#include "util.h" // for LOG()
 #include "utilstrencodings.h" // for GetTime()
 
 #include <limits>
@@ -75,14 +75,14 @@ void RandAddSeedPerfmon()
     {
         RAND_add(begin_ptr(vData), nSize, nSize / 100.0);
         memory_cleanse(begin_ptr(vData), nSize);
-        LogPrint("rand", "%s: %lu bytes\n", __func__, nSize);
+        LOG(RAND, "%s: %lu bytes\n", __func__, nSize);
     }
     else
     {
         static bool warned = false; // Warn only once
         if (!warned)
         {
-            LogPrintf("%s: Warning: RegQueryValueExA(HKEY_PERFORMANCE_DATA) failed with code %i\n", __func__, ret);
+            LOGA("%s: Warning: RegQueryValueExA(HKEY_PERFORMANCE_DATA) failed with code %i\n", __func__, ret);
             warned = true;
         }
     }
@@ -93,8 +93,7 @@ void GetRandBytes(unsigned char *buf, int num)
 {
     if (RAND_bytes(buf, num) != 1)
     {
-        LogPrintf(
-            "%s: OpenSSL RAND_bytes() failed with error: %s\n", __func__, ERR_error_string(ERR_get_error(), NULL));
+        LOGA("%s: OpenSSL RAND_bytes() failed with error: %s\n", __func__, ERR_error_string(ERR_get_error(), NULL));
         assert(false);
     }
 }
@@ -121,31 +120,6 @@ uint256 GetRandHash()
     uint256 hash;
     GetRandBytes((unsigned char *)&hash, sizeof(hash));
     return hash;
-}
-
-uint32_t insecure_rand_Rz = 11;
-uint32_t insecure_rand_Rw = 11;
-void seed_insecure_rand(bool fDeterministic)
-{
-    // The seed values have some unlikely fixed points which we avoid.
-    if (fDeterministic)
-    {
-        insecure_rand_Rz = insecure_rand_Rw = 11;
-    }
-    else
-    {
-        uint32_t tmp;
-        do
-        {
-            GetRandBytes((unsigned char *)&tmp, 4);
-        } while (tmp == 0 || tmp == 0x9068ffffU);
-        insecure_rand_Rz = tmp;
-        do
-        {
-            GetRandBytes((unsigned char *)&tmp, 4);
-        } while (tmp == 0 || tmp == 0x464fffffU);
-        insecure_rand_Rw = tmp;
-    }
 }
 
 FastRandomContext::FastRandomContext(bool fDeterministic)

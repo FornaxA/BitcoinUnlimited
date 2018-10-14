@@ -1,6 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -18,6 +18,8 @@ class CChainParams;
 class CReserveKey;
 class CScript;
 class CWallet;
+
+extern CScript COINBASE_FLAGS;
 
 namespace Consensus
 {
@@ -57,12 +59,13 @@ private:
     int lastFewTxs;
     bool blockFinished;
 
-    bool buip055ChainBlock;
+    // will be initialized by IsUAHFforkActiveOnNextBlock
+    bool uahfChainBlock;
 
 public:
     BlockAssembler(const CChainParams &chainparams);
     /** Construct a new block template with coinbase to scriptPubKeyIn */
-    CBlockTemplate *CreateNewBlock(const CScript &scriptPubKeyIn);
+    std::unique_ptr<CBlockTemplate> CreateNewBlock(const CScript &scriptPubKeyIn);
 
 private:
     // utility functions
@@ -86,13 +89,21 @@ private:
     /** Bytes to reserve for coinbase and block header */
     uint64_t reserveBlockSize(const CScript &scriptPubKeyIn);
     /** Internal method to construct a new block template */
-    CBlockTemplate *CreateNewBlock(const CScript &scriptPubKeyIn, bool blockstreamCoreCompatible);
+    std::unique_ptr<CBlockTemplate> CreateNewBlock(const CScript &scriptPubKeyIn, bool blockstreamCoreCompatible);
     /** Constructs a coinbase transaction */
-    CMutableTransaction coinbaseTx(const CScript &scriptPubKeyIn, int nHeight, CAmount nValue);
+    CTransactionRef coinbaseTx(const CScript &scriptPubKeyIn, int nHeight, CAmount nValue);
 };
 
 /** Modify the extranonce in a block */
 void IncrementExtraNonce(CBlock *pblock, unsigned int &nExtraNonce);
 int64_t UpdateTime(CBlockHeader *pblock, const Consensus::Params &consensusParams, const CBlockIndex *pindexPrev);
+
+// TODO: There is no mining.h
+// Create mining.h (The next two functions are in mining.cpp) or leave them here ?
+
+/** Submit a mined block */
+UniValue SubmitBlock(CBlock &block);
+/** Make a block template to send to miners. */
+UniValue mkblocktemplate(const UniValue &params, CBlock *pblockOut);
 
 #endif // BITCOIN_MINER_H

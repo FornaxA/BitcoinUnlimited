@@ -3,6 +3,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include "consensus/tx_verify.h"
 #include "key.h"
 #include "pubkey.h"
 #include "script/script.h"
@@ -12,7 +13,6 @@
 
 #include <vector>
 
-#include <boost/foreach.hpp>
 #include <boost/test/unit_test.hpp>
 
 using namespace std;

@@ -1,5 +1,5 @@
 // Copyright (c) 2011-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 #include "uint256.h"
@@ -55,18 +55,6 @@ std::string ArrayToString(const unsigned char A[], unsigned int width)
     return Stream.str();
 }
 
-inline uint160 uint160S(const char *str)
-{
-    uint160 rv;
-    rv.SetHex(str);
-    return rv;
-}
-inline uint160 uint160S(const std::string &str)
-{
-    uint160 rv;
-    rv.SetHex(str);
-    return rv;
-}
 
 BOOST_AUTO_TEST_CASE(basics) // constructors, equality, inequality
 {

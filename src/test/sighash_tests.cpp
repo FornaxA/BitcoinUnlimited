@@ -3,16 +3,17 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include "consensus/tx_verify.h"
 #include "consensus/validation.h"
 #include "data/sighash.json.h"
 #include "hash.h"
 #include "main.h" // For CheckTransaction
-#include "random.h"
 #include "script/interpreter.h"
 #include "script/script.h"
 #include "serialize.h"
 #include "streams.h"
 #include "test/test_bitcoin.h"
+#include "test/test_random.h"
 #include "util.h"
 #include "utilstrencodings.h"
 #include "version.h"
@@ -227,7 +228,20 @@ BOOST_AUTO_TEST_CASE(sighash_from_data)
         }
 
         sh = SignatureHash(scriptCode, tx, nIn, nHashType, 0, 0);
+        assert(sh != SIGNATURE_HASH_ERROR);
         BOOST_CHECK_MESSAGE(sh.GetHex() == sigHashHex, strTest);
     }
+}
+
+BOOST_AUTO_TEST_CASE(sighash_test_fail)
+{
+    CScript scriptCode = CScript();
+    CTransaction tx;
+    const int nIn = 1;
+    const int nHashType = 0;
+    // should fail because nIn point is invalid
+    // Note that this basically broken behavior of SignatureHashLegacy()
+    uint256 hash = SignatureHash(scriptCode, tx, nIn, nHashType, 0, 0);
+    BOOST_CHECK(hash == SIGNATURE_HASH_ERROR);
 }
 BOOST_AUTO_TEST_SUITE_END()

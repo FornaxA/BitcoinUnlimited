@@ -1,10 +1,11 @@
 // Copyright (c) 2011-2013 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "base58.h" // Freeze CBitcoinAddress
 #include "chain.h" // Freeze CBlockIndex
+#include "dstencode.h"
 #include "key.h"
 #include "keystore.h"
 #include "policy/policy.h"
@@ -20,7 +21,6 @@
 #include "wallet/wallet.h" // Freeze wallet test
 #endif
 
-#include <boost/foreach.hpp>
 #include <boost/test/unit_test.hpp>
 
 using namespace std;
@@ -31,23 +31,16 @@ BOOST_FIXTURE_TEST_SUITE(multisig_tests, BasicTestingSetup)
 
 CScript sign_multisig(CScript scriptPubKey, vector<CKey> keys, CTransaction transaction, int whichIn)
 {
-#ifdef BITCOIN_CASH
     uint256 hash = SignatureHash(scriptPubKey, transaction, whichIn, SIGHASH_ALL | SIGHASH_FORKID, 0);
-#else
-    uint256 hash = SignatureHash(scriptPubKey, transaction, whichIn, SIGHASH_ALL, 0);
-#endif
+    BOOST_CHECK(hash != SIGNATURE_HASH_ERROR);
 
     CScript result;
     result << OP_0; // CHECKMULTISIG bug workaround
-    BOOST_FOREACH (const CKey &key, keys)
+    for (const CKey &key : keys)
     {
         vector<unsigned char> vchSig;
         BOOST_CHECK(key.Sign(hash, vchSig));
-#ifdef BITCOIN_CASH
         vchSig.push_back((unsigned char)SIGHASH_ALL | SIGHASH_FORKID);
-#else
-        vchSig.push_back((unsigned char)SIGHASH_ALL);
-#endif
         result << vchSig;
     }
     return result;
@@ -55,11 +48,7 @@ CScript sign_multisig(CScript scriptPubKey, vector<CKey> keys, CTransaction tran
 
 BOOST_AUTO_TEST_CASE(multisig_verify)
 {
-#ifdef BITCOIN_CASH
     unsigned int flags = SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_STRICTENC | SCRIPT_ENABLE_SIGHASH_FORKID;
-#else
-    unsigned int flags = SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_STRICTENC;
-#endif
 
     ScriptError err;
     CKey key[4];
@@ -373,7 +362,7 @@ BOOST_AUTO_TEST_CASE(cltv_freeze)
 
     // check cltv solve for block
     CPubKey newKey1 = ToByteVector(key[0].GetPubKey());
-    CBitcoinAddress newAddr1(newKey1.GetID());
+    CTxDestination newAddr1 = CTxDestination(newKey1.GetID());
     CScriptNum nFreezeLockTime(50000);
     CScript s1 = GetScriptForFreeze(nFreezeLockTime, newKey1);
 
@@ -385,15 +374,14 @@ BOOST_AUTO_TEST_CASE(cltv_freeze)
     nRequiredReturn = 0;
     ExtractDestinations(s1, type, addresses, nRequiredReturn);
 
-    BOOST_FOREACH (const CTxDestination &addr, addresses)
-        BOOST_CHECK(newAddr1.ToString() == CBitcoinAddress(addr).ToString());
-
+    for (const CTxDestination &addr : addresses)
+        BOOST_CHECK(EncodeDestination(newAddr1) == EncodeDestination(addr));
     BOOST_CHECK(nRequiredReturn == 1);
 
 
     // check cltv solve for datetime
     CPubKey newKey2 = ToByteVector(key[0].GetPubKey());
-    CBitcoinAddress newAddr2(newKey2.GetID());
+    CTxDestination newAddr2 = CTxDestination(newKey2.GetID());
     nFreezeLockTime = CScriptNum(1482255731);
     CScript s2 = GetScriptForFreeze(nFreezeLockTime, newKey2);
 
@@ -405,8 +393,8 @@ BOOST_AUTO_TEST_CASE(cltv_freeze)
     nRequiredReturn = 0;
     ExtractDestinations(s2, type, addresses, nRequiredReturn);
 
-    BOOST_FOREACH (const CTxDestination &addr, addresses)
-        BOOST_CHECK(newAddr2.ToString() == CBitcoinAddress(addr).ToString());
+    for (const CTxDestination &addr : addresses)
+        BOOST_CHECK(newAddr2 == addr);
 
     BOOST_CHECK(nRequiredReturn == 1);
 }

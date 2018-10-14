@@ -1,5 +1,5 @@
 // Copyright (c) 2011-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -8,6 +8,7 @@
 
 #include "addressbookpage.h"
 #include "addresstablemodel.h"
+#include "config.h"
 #include "guiutil.h"
 #include "optionsmodel.h"
 #include "platformstyle.h"
@@ -16,8 +17,8 @@
 #include <QApplication>
 #include <QClipboard>
 
-SendCoinsEntry::SendCoinsEntry(const PlatformStyle *platformStyle, QWidget *parent)
-    : QStackedWidget(parent), ui(new Ui::SendCoinsEntry), model(0), platformStyle(platformStyle)
+SendCoinsEntry::SendCoinsEntry(const PlatformStyle *_platformStyle, QWidget *parent)
+    : QStackedWidget(parent), ui(new Ui::SendCoinsEntry), model(0), platformStyle(_platformStyle)
 {
     ui->setupUi(this);
 
@@ -27,15 +28,20 @@ SendCoinsEntry::SendCoinsEntry(const PlatformStyle *platformStyle, QWidget *pare
     ui->deleteButton_is->setIcon(platformStyle->SingleColorIcon(":/icons/remove"));
     ui->deleteButton_s->setIcon(platformStyle->SingleColorIcon(":/icons/remove"));
 
+    ui->messageTextLabel->setToolTip(tr("A message that was attached to the %1 URI which will be"
+                                        " stored with the transaction for your reference. Note: "
+                                        "This message will not be sent over the Bitcoin network.")
+                                         .arg(GUIUtil::bitcoinURIScheme(GetConfig())));
+
     setCurrentWidget(ui->SendCoins);
 
     if (platformStyle->getUseExtraSpacing())
+    {
         ui->payToLayout->setSpacing(4);
-#if QT_VERSION >= 0x040700
+    }
     ui->addAsLabel->setPlaceholderText(tr("Enter a private label for this address to add it to your address book"));
     ui->lineEditPublic->setPlaceholderText(tr("Enter a public label for this transaction"));
 
-#endif
 
     // normal bitcoin address field
     GUIUtil::setupAddressWidget(ui->payTo, this);
@@ -71,11 +77,11 @@ void SendCoinsEntry::on_addressBookButton_clicked()
 }
 
 void SendCoinsEntry::on_payTo_textChanged(const QString &address) { updateLabel(address); }
-void SendCoinsEntry::setModel(WalletModel *model)
+void SendCoinsEntry::setModel(WalletModel *_model)
 {
-    this->model = model;
+    this->model = _model;
 
-    if (model && model->getOptionsModel())
+    if (_model && _model->getOptionsModel())
         connect(model->getOptionsModel(), SIGNAL(displayUnitChanged(int)), this, SLOT(updateDisplayUnit()));
 
     clear();
@@ -100,7 +106,7 @@ void SendCoinsEntry::clear()
     ui->memoTextLabel_s->clear();
     ui->payAmount_s->clear();
 
-    // update the display unit, to not use the default ("BTC")
+    // update the display unit, to not use the default ("BCH")
     updateDisplayUnit();
 }
 

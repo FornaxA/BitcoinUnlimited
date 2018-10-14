@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2016-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -84,7 +84,7 @@ public:
                 }
                 else
                 {
-                    LogPrintf("Unknown Subject Alternate Name type: %d.  This may cause a bitnodes cert error.\n",
+                    LOGA("Unknown Subject Alternate Name type: %d.  This may cause a bitnodes cert error.\n",
                         generalName->type);
                 }
             }
@@ -105,7 +105,7 @@ public:
     {
         if (!error)
         {
-            LogPrintf("Bitnodes connection timed out.\n");
+            LOGA("Bitnodes connection timed out.\n");
             socket_.lowest_layer().cancel();
         }
     }
@@ -305,10 +305,10 @@ bool GetLeaderboardFromBitnodes(vector<string> &vIPs)
             for (std::vector<UniValue>::iterator it = v.begin(); it != v.end(); ++it)
             {
                 const UniValue &o = *it;
-                const UniValue &result = find_value(o, "node");
-                if (result.isStr())
+                const UniValue &_result = find_value(o, "node");
+                if (_result.isStr())
                 {
-                    string s = result.get_str();
+                    string s = _result.get_str();
                     vIPs.push_back(s);
                     count++;
                 }
@@ -317,7 +317,7 @@ bool GetLeaderboardFromBitnodes(vector<string> &vIPs)
     }
     catch (std::exception &e)
     {
-        LogPrintf("Bitnodes Exception: %s\n", e.what());
+        LOGA("Bitnodes Exception: %s\n", e.what());
     }
 
     return (count > 0);

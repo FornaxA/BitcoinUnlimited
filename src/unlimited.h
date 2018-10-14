@@ -1,15 +1,13 @@
 // Copyright (c) 2015 G. Andrew Stone
-// Copyright (c) 2016-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2016-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #ifndef BITCOIN_UNLIMITED_H
 #define BITCOIN_UNLIMITED_H
 
-#include "buip055fork.h"
 #include "chain.h"
 #include "checkqueue.h"
-#include "clientversion.h"
 #include "coins.h"
 #include "consensus/params.h"
 #include "consensus/validation.h"
@@ -19,6 +17,7 @@
 #include "stat.h"
 #include "thinblock.h"
 #include "tweak.h"
+#include "uahf_fork.h"
 #include "univalue/include/univalue.h"
 #include <boost/thread.hpp>
 #include <list>
@@ -27,11 +26,10 @@
 enum
 {
     TYPICAL_BLOCK_SIZE = 200000, // used for initial buffer size
-    DEFAULT_MAX_GENERATED_BLOCK_SIZE = 1000000, // default for the maximum size of mined blocks
     DEFAULT_EXCESSIVE_ACCEPT_DEPTH = 12, // Default is 12 to make it very expensive for a minority hash power to get
     // lucky, and potentially drive a block that the rest of the network sees as
     // "excessive" onto the blockchain.
-    DEFAULT_EXCESSIVE_BLOCK_SIZE = 16000000,
+    DEFAULT_EXCESSIVE_BLOCK_SIZE = 8000000, // per UAHF spec REQ-4-1, EB has to be at least 8MB at startup
     DEFAULT_MAX_MESSAGE_SIZE_MULTIPLIER = 16, // Allowed messages lengths will be this * the excessive block size
     DEFAULT_COINBASE_RESERVE_SIZE = 1000,
     MAX_COINBASE_SCRIPTSIG_SIZE = 100,
@@ -40,17 +38,9 @@ enum
         30, // Default for the number of days in the past we check scripts during initial block download
 
     MAX_HEADER_REQS_DURING_IBD = 3,
-// if the blockchain is this far (in seconds) behind the current time, only request headers from a single
-// peer.  This makes IBD more efficient.  We make BITCOIN_CASH more lenient here because mining could be
-// more erratic and this node is likely to connect to non-BCC nodes.
-#ifdef BITCOIN_CASH
-    SINGLE_PEER_REQUEST_MODE_AGE = (7 * 24 * 60 * 60),
-#else
+    // if the blockchain is this far (in seconds) behind the current time, only request headers from a single
+    // peer.  This makes IBD more efficient.
     SINGLE_PEER_REQUEST_MODE_AGE = (24 * 60 * 60),
-#endif
-
-    BITCOIN_CASH_FORK_HEIGHT = 478559,
-
 };
 
 class CBlock;
@@ -60,6 +50,22 @@ struct CDiskBlockPos;
 class CNode;
 class CNodeRef;
 class CChainParams;
+
+/** Add or remove a string to indicate ongoing status */
+class CStatusString
+{
+    mutable CCriticalSection cs;
+    std::set<std::string> strSet;
+
+public:
+    void Set(const std::string &yourStatus);
+    void Clear(const std::string &yourStatus);
+
+    std::string GetPrintable() const;
+};
+
+extern CStatusString statusStrings;
+
 
 extern uint256 bitcoinCashForkBlockHash;
 
@@ -72,20 +78,9 @@ extern unsigned int maxMessageSizeMultiplier;
 /** BU Default maximum number of Outbound connections to simultaneously allow*/
 extern int nMaxOutConnections;
 
-extern std::vector<std::string>
-    BUComments; // BU005: Strings specific to the config of this client that should be communicated to other clients
+// BU005: Strings specific to the config of this client that should be communicated to other clients
+extern std::vector<std::string> BUComments;
 extern std::string minerComment; // An arbitrary field that miners can change to annotate their blocks
-
-// BU - Xtreme Thinblocks Auto Mempool Limiter - begin section
-/** The default value for -minrelaytxfee */
-static const char DEFAULT_MINLIMITERTXFEE[] = "0.000";
-/** The default value for -maxrelaytxfee */
-static const char DEFAULT_MAXLIMITERTXFEE[] = "3.000";
-/** The number of block heights to gradually choke spam transactions over */
-static const unsigned int MAX_BLOCK_SIZE_MULTIPLIER = 3;
-/** The minimum value possible for -limitfreerelay when rate limiting */
-static const unsigned int DEFAULT_MIN_LIMITFREERELAY = 1;
-// BU - Xtreme Thinblocks Auto Mempool Limiter - end section
 
 // The number of days in the past we check scripts during initial block download
 extern CTweak<uint64_t> checkScriptDays;
@@ -192,7 +187,8 @@ extern UniValue getstructuresizes(const UniValue &params, bool fHelp);
 
 // RPC Set a node to receive expedited blocks from
 UniValue expedited(const UniValue &params, bool fHelp);
-
+// RPC display all variant forms of an address
+UniValue getaddressforms(const UniValue &params, bool fHelp);
 // These variables for traffic shaping need to be globally scoped so the GUI and CLI can adjust the parameters
 extern CLeakyBucket receiveShaper;
 extern CLeakyBucket sendShaper;
@@ -200,10 +196,9 @@ extern CLeakyBucket sendShaper;
 // Test to determine if traffic shaping is enabled
 extern bool IsTrafficShapingEnabled();
 
-
 // Check whether we are doing an initial block download (synchronizing from disk or network)
 extern bool IsInitialBlockDownload();
-extern void IsInitialBlockDownloadInit();
+extern void IsInitialBlockDownloadInit(bool *fInit = nullptr);
 
 // Check whether we are nearly sync'd.  Used primarily to determine whether an xthin can be retrieved.
 extern bool IsChainNearlySyncd();
@@ -256,8 +251,10 @@ extern CStatHistory<uint64_t, MinValMax<uint64_t> > poolSize;
 
 // Configuration variable validators
 bool MiningAndExcessiveBlockValidatorRule(const uint64_t newExcessiveBlockSize, const uint64_t newMiningBlockSize);
+std::string AcceptDepthValidator(const unsigned int &value, unsigned int *item, bool validate);
 std::string ExcessiveBlockValidator(const uint64_t &value, uint64_t *item, bool validate);
 std::string OutboundConnectionValidator(const int &value, int *item, bool validate);
+std::string MaxDataCarrierValidator(const unsigned int &value, unsigned int *item, bool validate);
 std::string SubverValidator(const std::string &value, std::string *item, bool validate);
 std::string MiningBlockSizeValidator(const uint64_t &value, uint64_t *item, bool validate);
 
@@ -273,6 +270,25 @@ extern std::list<CStatBase *> mallocedStats;
 extern CCriticalSection cs_blockvalidationthread;
 void InterruptBlockValidationThreads();
 
+// Fork configuration
+/** This specifies the MTP time of the next fork */
 extern CTweak<uint64_t> miningForkTime;
-extern CTweak<bool> onlyAcceptForkSig;
+/** This specifies the minimum excessive block setting at the fork point */
+extern CTweak<uint64_t> miningForkEB;
+/** This specifies the minimum max block size at the fork point */
+extern CTweak<uint64_t> miningForkMG;
+
+// Mining-Candidate start
+/** Return a Merkle root given a Coinbase hash and Merkle proof */
+uint256 CalculateMerkleRoot(uint256 &coinbase_hash, const std::vector<uint256> &merkleProof);
+/** Return Merkle branches for a Block */
+std::vector<uint256> GetMerkleProofBranches(CBlock *pblock);
+
+/** Keep track of mining candidates */
+class CMiningCandidate
+{
+public:
+    CBlock block;
+};
+extern std::map<int64_t, CMiningCandidate> miningCandidatesMap;
 #endif

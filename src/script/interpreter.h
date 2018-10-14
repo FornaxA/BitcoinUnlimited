@@ -1,19 +1,18 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #ifndef BITCOIN_SCRIPT_INTERPRETER_H
 #define BITCOIN_SCRIPT_INTERPRETER_H
 
-#include "clientversion.h"
-#include "script_error.h"
 #include "primitives/transaction.h"
+#include "script_error.h"
 
-#include <vector>
 #include <stdint.h>
 #include <string>
+#include <vector>
 
 class CPubKey;
 class CScript;
@@ -30,13 +29,19 @@ enum
     SIGHASH_ANYONECANPAY = 0x80,
 };
 
+/** Data signature types (for OP_DATASIGVERIFY) */
+enum
+{
+    DATASIG_COMPACT_ECDSA = 1,
+};
+
 /** Script verification flags */
 enum
 {
-    SCRIPT_VERIFY_NONE      = 0,
+    SCRIPT_VERIFY_NONE = 0,
 
     // Evaluate P2SH subscripts (softfork safe, BIP16).
-    SCRIPT_VERIFY_P2SH      = (1U << 0),
+    SCRIPT_VERIFY_P2SH = (1U << 0),
 
     // Passing a non-strict-DER signature or one with undefined hashtype to a checksig operation causes script failure.
     // Evaluating a pubkey that is not (0x04 + 64 bytes) or (0x02 or 0x03 + 32 bytes) by checksig causes script failure.
@@ -44,11 +49,11 @@ enum
     SCRIPT_VERIFY_STRICTENC = (1U << 1),
 
     // Passing a non-strict-DER signature to a checksig operation causes script failure (softfork safe, BIP62 rule 1)
-    SCRIPT_VERIFY_DERSIG    = (1U << 2),
+    SCRIPT_VERIFY_DERSIG = (1U << 2),
 
     // Passing a non-strict-DER signature or one with S > order/2 to a checksig operation causes script failure
     // (softfork safe, BIP62 rule 5).
-    SCRIPT_VERIFY_LOW_S     = (1U << 3),
+    SCRIPT_VERIFY_LOW_S = (1U << 3),
 
     // verify dummy stack item consumed by CHECKMULTISIG is of zero-length (softfork safe, BIP62 rule 7).
     SCRIPT_VERIFY_NULLDUMMY = (1U << 4),
@@ -71,7 +76,7 @@ enum
     // discouraged NOPs fails the script. This verification flag will never be
     // a mandatory flag applied to scripts in a block. NOPs that are not
     // executed, e.g.  within an unexecuted IF ENDIF block, are *not* rejected.
-    SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_NOPS  = (1U << 7),
+    SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_NOPS = (1U << 7),
 
     // Require that only a single stack element remains after evaluation. This changes the success criterion from
     // "At least one stack element must remain, and when interpreted as a boolean, it must be true" to
@@ -97,43 +102,51 @@ enum
     //
     //
     SCRIPT_ENABLE_SIGHASH_FORKID = (1U << 16),
+
+    // Enable Replay protection.
+    SCRIPT_ENABLE_REPLAY_PROTECTION = (1U << 17),
+
+    // Enable new opcodes.
+    //
+    SCRIPT_ENABLE_MAY152018_OPCODES = (1U << 18),
 };
 
-bool CheckSignatureEncoding(const std::vector<unsigned char> &vchSig, unsigned int flags, ScriptError* serror);
+bool CheckSignatureEncoding(const std::vector<unsigned char> &vchSig, unsigned int flags, ScriptError *serror);
+
+// WARNING:
+// SIGNATURE_HASH_ERROR represents the special value of uint256(1) that is used by the legacy SignatureHash
+// function to signal errors in calculating the signature hash. This export is ONLY meant to check for the
+// consensus-critical oddities of the legacy signature validation code and SHOULD NOT be used to signal
+// problems during signature hash calculations for any current BCH signature hash functions!
+extern const uint256 SIGNATURE_HASH_ERROR;
 
 // If you are signing you may call this function and the BitcoinCash or Legacy method will be chosen based on nHashType
-uint256 SignatureHash(const CScript &scriptCode, const CTransaction& txTo, unsigned int nIn, uint32_t nHashType, const CAmount &amount, size_t* nHashedOut=NULL);
-// If you are validating signatures, you must call the appropriate function based on what fork you are on, because
-// the nHashType SIGHASH_FORKID bit is undefined in Legacy mode -- that is, it is valid to set it to one but still
-// sign using the legacy method
-uint256 SignatureHashBitcoinCash(const CScript &scriptCode, const CTransaction& txTo, unsigned int nIn, uint32_t nHashType, const CAmount &amount, size_t* nHashedOut=NULL);
-uint256 SignatureHashLegacy(const CScript& scriptCode, const CTransaction& txTo, unsigned int nIn, uint32_t nHashType, const CAmount &amount, size_t* nHashedOut);
+uint256 SignatureHash(const CScript &scriptCode,
+    const CTransaction &txTo,
+    unsigned int nIn,
+    uint32_t nHashType,
+    const CAmount &amount,
+    size_t *nHashedOut = NULL);
 
 class BaseSignatureChecker
 {
 public:
-    virtual bool CheckSig(const std::vector<unsigned char>& scriptSig, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode) const
+    virtual bool CheckSig(const std::vector<unsigned char> &scriptSig,
+        const std::vector<unsigned char> &vchPubKey,
+        const CScript &scriptCode) const
     {
         return false;
     }
 
-    virtual bool CheckLockTime(const CScriptNum& nLockTime) const
-    {
-         return false;
-    }
-
-    virtual bool CheckSequence(const CScriptNum& nSequence) const
-    {
-         return false;
-    }
-
+    virtual bool CheckLockTime(const CScriptNum &nLockTime) const { return false; }
+    virtual bool CheckSequence(const CScriptNum &nSequence) const { return false; }
     virtual ~BaseSignatureChecker() {}
 };
 
 class TransactionSignatureChecker : public BaseSignatureChecker
 {
 private:
-    const CTransaction* txTo;
+    const CTransaction *txTo;
     unsigned int nIn;
     const CAmount amount;
     mutable size_t nBytesHashed;
@@ -141,17 +154,23 @@ private:
     unsigned int nFlags;
 
 protected:
-    virtual bool VerifySignature(const std::vector<unsigned char>& vchSig, const CPubKey& vchPubKey, const uint256& sighash) const;
+    virtual bool VerifySignature(const std::vector<unsigned char> &vchSig,
+        const CPubKey &vchPubKey,
+        const uint256 &sighash) const;
 
 public:
-#ifdef BITCOIN_CASH
-    TransactionSignatureChecker(const CTransaction* txToIn, unsigned int nInIn, const CAmount &amountIn, unsigned int flags=SCRIPT_ENABLE_SIGHASH_FORKID) : txTo(txToIn), nIn(nInIn), amount(amountIn), nBytesHashed(0), nSigops(0), nFlags(flags) {}
-#else
-    TransactionSignatureChecker(const CTransaction* txToIn, unsigned int nInIn, const CAmount &amountIn, unsigned int flags=0) : txTo(txToIn), nIn(nInIn), amount(amountIn), nBytesHashed(0), nSigops(0), nFlags(flags) {}
-#endif
-    bool CheckSig(const std::vector<unsigned char>& scriptSig, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode) const;
-    bool CheckLockTime(const CScriptNum& nLockTime) const;
-    bool CheckSequence(const CScriptNum& nSequence) const;
+    TransactionSignatureChecker(const CTransaction *txToIn,
+        unsigned int nInIn,
+        const CAmount &amountIn,
+        unsigned int flags = SCRIPT_ENABLE_SIGHASH_FORKID)
+        : txTo(txToIn), nIn(nInIn), amount(amountIn), nBytesHashed(0), nSigops(0), nFlags(flags)
+    {
+    }
+    bool CheckSig(const std::vector<unsigned char> &scriptSig,
+        const std::vector<unsigned char> &vchPubKey,
+        const CScript &scriptCode) const;
+    bool CheckLockTime(const CScriptNum &nLockTime) const;
+    bool CheckSequence(const CScriptNum &nSequence) const;
     size_t GetBytesHashed() const { return nBytesHashed; }
     size_t GetNumSigops() const { return nSigops; }
 };
@@ -162,14 +181,30 @@ private:
     const CTransaction txTo;
 
 public:
-#ifdef BITCOIN_CASH
-    MutableTransactionSignatureChecker(const CMutableTransaction* txToIn, unsigned int nInIn, const CAmount &amount, unsigned int flags=SCRIPT_ENABLE_SIGHASH_FORKID) : TransactionSignatureChecker(&txTo, nInIn, amount, flags), txTo(*txToIn) {}
-#else
-    MutableTransactionSignatureChecker(const CMutableTransaction* txToIn, unsigned int nInIn, const CAmount &amount, unsigned int flags=0) : TransactionSignatureChecker(&txTo, nInIn, amount, flags), txTo(*txToIn) {}
-#endif
+    MutableTransactionSignatureChecker(const CMutableTransaction *txToIn,
+        unsigned int nInIn,
+        const CAmount &amountIn,
+        unsigned int flags = SCRIPT_ENABLE_SIGHASH_FORKID)
+        : TransactionSignatureChecker(&txTo, nInIn, amountIn, flags), txTo(*txToIn)
+    {
+    }
 };
 
-bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& script, unsigned int flags, const BaseSignatureChecker& checker, ScriptError* error = NULL, unsigned char* sighashtype=NULL);
-bool VerifyScript(const CScript& scriptSig, const CScript& scriptPubKey, unsigned int flags, const BaseSignatureChecker& checker, ScriptError* error = NULL, unsigned char* sighashtype=NULL);
+bool EvalScript(std::vector<std::vector<unsigned char> > &stack,
+    const CScript &script,
+    unsigned int flags,
+    const BaseSignatureChecker &checker,
+    ScriptError *error = NULL,
+    unsigned char *sighashtype = NULL);
+bool VerifyScript(const CScript &scriptSig,
+    const CScript &scriptPubKey,
+    unsigned int flags,
+    const BaseSignatureChecker &checker,
+    ScriptError *error = NULL,
+    unsigned char *sighashtype = NULL);
+
+// string prefixed to data when validating signed messages either via DATASIGVERIFY or RPC call.  This ensures
+// that the signature was intended for use on this blockchain.
+extern const std::string strMessageMagic;
 
 #endif // BITCOIN_SCRIPT_INTERPRETER_H

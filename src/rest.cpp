@@ -1,9 +1,10 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include "blockstorage/blockstorage.h"
 #include "chain.h"
 #include "chainparams.h"
 #include "httpserver.h"
@@ -169,7 +170,7 @@ static bool rest_headers(HTTPRequest *req, const std::string &strURIPart)
     }
 
     CDataStream ssHeader(SER_NETWORK, PROTOCOL_VERSION);
-    BOOST_FOREACH (const CBlockIndex *pindex, headers)
+    for (const CBlockIndex *pindex : headers)
     {
         ssHeader << pindex->GetBlockHeader();
     }
@@ -194,7 +195,7 @@ static bool rest_headers(HTTPRequest *req, const std::string &strURIPart)
     case RF_JSON:
     {
         UniValue jsonHeaders(UniValue::VARR);
-        BOOST_FOREACH (const CBlockIndex *pindex, headers)
+        for (const CBlockIndex *pindex : headers)
         {
             jsonHeaders.push_back(blockheaderToJSON(pindex));
         }
@@ -388,13 +389,13 @@ static bool rest_tx(HTTPRequest *req, const std::string &strURIPart)
     if (!ParseHashStr(hashStr, hash))
         return RESTERR(req, HTTP_BAD_REQUEST, "Invalid hash: " + hashStr);
 
-    CTransaction tx;
+    CTransactionRef tx;
     uint256 hashBlock = uint256();
     if (!GetTransaction(hash, tx, Params().GetConsensus(), hashBlock, true))
         return RESTERR(req, HTTP_NOT_FOUND, hashStr + " not found");
 
     CDataStream ssTx(SER_NETWORK, PROTOCOL_VERSION);
-    ssTx << tx;
+    ssTx << *tx;
 
     switch (rf)
     {
@@ -417,7 +418,7 @@ static bool rest_tx(HTTPRequest *req, const std::string &strURIPart)
     case RF_JSON:
     {
         UniValue objTx(UniValue::VOBJ);
-        TxToJSON(tx, hashBlock, objTx);
+        TxToJSON(*tx, hashBlock, objTx);
         string strJSON = objTx.write() + "\n";
         req->WriteHeader("Content-Type", "application/json");
         req->WriteReply(HTTP_OK, strJSON);
@@ -495,7 +496,7 @@ static bool rest_getutxos(HTTPRequest *req, const std::string &strURIPart)
         std::vector<unsigned char> strRequestV = ParseHex(strRequestMutable);
         strRequestMutable.assign(strRequestV.begin(), strRequestV.end());
     }
-
+    // FALLTHROUGH
     case RF_BINARY:
     {
         try
@@ -546,7 +547,8 @@ static bool rest_getutxos(HTTPRequest *req, const std::string &strURIPart)
     std::vector<bool> hits;
     bitmap.resize((vOutPoints.size() + 7) / 8);
     {
-        LOCK2(cs_main, mempool.cs);
+        LOCK(cs_main);
+        READLOCK(mempool.cs);
 
         CCoinsView viewDummy;
         CCoinsViewCache view(&viewDummy);
@@ -611,7 +613,7 @@ static bool rest_getutxos(HTTPRequest *req, const std::string &strURIPart)
         objGetUTXOResponse.push_back(Pair("bitmap", bitmapStringRepresentation));
 
         UniValue utxos(UniValue::VARR);
-        BOOST_FOREACH (const CCoin &coin, outs)
+        for (const CCoin &coin : outs)
         {
             UniValue utxo(UniValue::VOBJ);
             utxo.push_back(Pair("height", (int32_t)coin.nHeight));

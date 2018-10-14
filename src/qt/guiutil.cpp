@@ -1,5 +1,5 @@
 // Copyright (c) 2011-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -7,18 +7,22 @@
 
 #include "bitcoinaddressvalidator.h"
 #include "bitcoinunits.h"
-#include "clientversion.h"
 #include "qvalidatedlineedit.h"
 #include "walletmodel.h"
 
+#include "cashaddr.h"
+#include "config.h"
+#include "dstencode.h"
 #include "fs.h"
 #include "init.h"
 #include "main.h" // For minRelayTxFee
+#include "policy/policy.h"
 #include "primitives/transaction.h"
 #include "protocol.h"
 #include "script/script.h"
 #include "script/standard.h"
 #include "util.h"
+#include "utilstrencodings.h"
 
 #ifdef WIN32
 #ifdef _WIN32_WINNT
@@ -53,14 +57,9 @@
 #include <QSettings>
 #include <QTextDocument> // for Qt::mightBeRichText
 #include <QThread>
-
-#if QT_VERSION < 0x050000
-#include <QUrl>
-#else
 #include <QUrlQuery>
-#endif
 
-#if QT_VERSION >= 0x50200
+#if QT_VERSION >= 0x050200
 #include <QFontDatabase>
 #endif
 
@@ -86,17 +85,40 @@ QString dateTimeStr(const QDateTime &date)
 QString dateTimeStr(qint64 nTime) { return dateTimeStr(QDateTime::fromTime_t((qint32)nTime)); }
 QFont fixedPitchFont()
 {
-#if QT_VERSION >= 0x50200
+#if QT_VERSION >= 0x050200
     return QFontDatabase::systemFont(QFontDatabase::FixedFont);
 #else
     QFont font("Monospace");
-#if QT_VERSION >= 0x040800
     font.setStyleHint(QFont::Monospace);
-#else
-    font.setStyleHint(QFont::TypeWriter);
-#endif
     return font;
 #endif
+}
+
+static std::string MakeAddrInvalid(std::string addr)
+{
+    if (addr.size() < 2)
+    {
+        return "";
+    }
+
+    // Checksum is at the end of the address. Swapping chars to make it invalid.
+    std::swap(addr[addr.size() - 1], addr[addr.size() - 2]);
+    if (!IsValidDestinationString(addr))
+    {
+        return addr;
+    }
+    return "";
+}
+
+std::string DummyAddress(const CChainParams &params, const Config &cfg)
+{
+    // Just some dummy data to generate an convincing random-looking (but
+    // consistent) address
+    static const std::vector<uint8_t> dummydata = {0xeb, 0x15, 0x23, 0x1d, 0xfc, 0xeb, 0x60, 0x92, 0x58, 0x86, 0xb6,
+        0x7d, 0x06, 0x52, 0x99, 0x92, 0x59, 0x15, 0xae, 0xb1};
+
+    const CTxDestination dstKey = CKeyID(uint160(dummydata));
+    return MakeAddrInvalid(EncodeDestination(dstKey, params, cfg));
 }
 
 void setupAddressWidget(QValidatedLineEdit *widget, QWidget *parent)
@@ -104,13 +126,12 @@ void setupAddressWidget(QValidatedLineEdit *widget, QWidget *parent)
     parent->setFocusProxy(widget);
 
     widget->setFont(fixedPitchFont());
-#if QT_VERSION >= 0x040700
+    const CChainParams &params = Params();
     // We don't want translators to use own addresses in translations
     // and this is the only place, where this address is supplied.
-    widget->setPlaceholderText(
-        QObject::tr("Enter a Bitcoin address (e.g. %1)").arg("1NS17iag9jJgTHD1VXjvLCEnZuQ3rJDE9L"));
-#endif
-    widget->setValidator(new BitcoinAddressEntryValidator(parent));
+    widget->setPlaceholderText(QObject::tr("Enter a Bitcoin address (e.g. %1)")
+                                   .arg(QString::fromStdString(DummyAddress(params, GetConfig()))));
+    widget->setValidator(new BitcoinAddressEntryValidator(params.CashAddrPrefix(), parent));
     widget->setCheckValidator(new BitcoinAddressCheckValidator(parent));
 }
 
@@ -123,14 +144,45 @@ void setupAmountWidget(QLineEdit *widget, QWidget *parent)
     widget->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
 }
 
-bool parseBitcoinURI(const QUrl &uri, SendCoinsRecipient *out)
+QString bitcoinURIScheme(const CChainParams &params, bool useCashAddr)
 {
-    // return if URI is not valid or is no bitcoin: URI
-    if (!uri.isValid() || uri.scheme() != QString("bitcoin"))
+    if (!useCashAddr)
+    {
+        return "bitcoincash";
+    }
+    return QString::fromStdString(params.CashAddrPrefix());
+}
+
+QString bitcoinURIScheme(const Config &cfg)
+{
+    return bitcoinURIScheme(cfg.GetChainParams(), cfg.UseCashAddrEncoding());
+}
+
+static bool IsCashAddrEncoded(const QUrl &uri)
+{
+    const std::string addr = (uri.scheme() + ":" + uri.path()).toStdString();
+    auto decoded = cashaddr::Decode(addr, "");
+    return !decoded.first.empty();
+}
+
+bool parseBitcoinURI(const QString &scheme, const QUrl &uri, SendCoinsRecipient *out)
+{
+    // return if URI has wrong scheme.
+    if (!uri.isValid() || uri.scheme() != scheme)
+    {
         return false;
+    }
 
     SendCoinsRecipient rv;
-    rv.address = uri.path();
+    if (IsCashAddrEncoded(uri))
+    {
+        rv.address = uri.scheme() + ":" + uri.path();
+    }
+    else
+    {
+        // strip out uri scheme for base58 encoded addresses
+        rv.address = uri.path();
+    }
     // Trim any following forward slash which may have been added by the OS
     if (rv.address.endsWith("/"))
     {
@@ -138,12 +190,8 @@ bool parseBitcoinURI(const QUrl &uri, SendCoinsRecipient *out)
     }
     rv.amount = 0;
 
-#if QT_VERSION < 0x050000
-    QList<QPair<QString, QString> > items = uri.queryItems();
-#else
     QUrlQuery uriQuery(uri);
     QList<QPair<QString, QString> > items = uriQuery.queryItems();
-#endif
     for (QList<QPair<QString, QString> >::iterator i = items.begin(); i != items.end(); i++)
     {
         bool fShouldReturnFalse = false;
@@ -167,7 +215,7 @@ bool parseBitcoinURI(const QUrl &uri, SendCoinsRecipient *out)
         {
             if (!i->second.isEmpty())
             {
-                if (!BitcoinUnits::parse(BitcoinUnits::BTC, i->second, &rv.amount))
+                if (!BitcoinUnits::parse(BitcoinUnits::BCH, i->second, &rv.amount))
                 {
                     return false;
                 }
@@ -185,29 +233,34 @@ bool parseBitcoinURI(const QUrl &uri, SendCoinsRecipient *out)
     return true;
 }
 
-bool parseBitcoinURI(QString uri, SendCoinsRecipient *out)
+bool parseBitcoinURI(const QString &scheme, QString uri, SendCoinsRecipient *out)
 {
-    // Convert bitcoin:// to bitcoin:
     //
-    //    Cannot handle this later, because bitcoin:// will cause Qt to see the part after // as host,
+    //    Cannot handle this later, because bitcoincash://
+    //    will cause Qt to see the part after // as host,
     //    which will lower-case it (and thus invalidate the address).
-    if (uri.startsWith("bitcoin://", Qt::CaseInsensitive))
+    if (uri.startsWith(scheme + "://", Qt::CaseInsensitive))
     {
-        uri.replace(0, 10, "bitcoin:");
+        uri.replace(0, scheme.length() + 3, scheme + ":");
     }
     QUrl uriInstance(uri);
-    return parseBitcoinURI(uriInstance, out);
+    return parseBitcoinURI(scheme, uriInstance, out);
 }
 
-QString formatBitcoinURI(const SendCoinsRecipient &info)
+QString formatBitcoinURI(const Config &cfg, const SendCoinsRecipient &info)
 {
-    QString ret = QString("bitcoin:%1").arg(info.address);
+    QString ret = info.address;
+    if (!cfg.UseCashAddrEncoding())
+    {
+        // prefix address with uri scheme for base58 encoded addresses.
+        ret = (bitcoinURIScheme(cfg) + ":%1").arg(ret);
+    }
     int paramCount = 0;
 
     if (info.amount)
     {
         ret += QString("?amount=%1")
-                   .arg(BitcoinUnits::format(BitcoinUnits::BTC, info.amount, false, BitcoinUnits::separatorNever));
+                   .arg(BitcoinUnits::format(BitcoinUnits::BCH, info.amount, false, BitcoinUnits::separatorNever));
         paramCount++;
     }
 
@@ -232,19 +285,15 @@ QString formatBitcoinURI(const SendCoinsRecipient &info)
 
 bool isDust(const QString &address, const CAmount &amount)
 {
-    CTxDestination dest = CBitcoinAddress(address.toStdString()).Get();
+    CTxDestination dest = DecodeDestination(address.toStdString());
     CScript script = GetScriptForDestination(dest);
     CTxOut txOut(amount, script);
-    return txOut.IsDust(::minRelayTxFee);
+    return txOut.IsDust();
 }
 
 QString HtmlEscape(const QString &str, bool fMultiLine)
 {
-#if QT_VERSION < 0x050000
-    QString escaped = Qt::escape(str);
-#else
     QString escaped = str.toHtmlEscaped();
-#endif
     if (fMultiLine)
     {
         escaped = escaped.replace("\n", "<br>\n");
@@ -294,11 +343,7 @@ QString getSaveFileName(QWidget *parent,
     QString myDir;
     if (dir.isEmpty()) // Default to user documents location
     {
-#if QT_VERSION < 0x050000
-        myDir = QDesktopServices::storageLocation(QDesktopServices::DocumentsLocation);
-#else
         myDir = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
-#endif
     }
     else
     {
@@ -347,11 +392,7 @@ QString getOpenFileName(QWidget *parent,
     QString myDir;
     if (dir.isEmpty()) // Default to user documents location
     {
-#if QT_VERSION < 0x050000
-        myDir = QDesktopServices::storageLocation(QDesktopServices::DocumentsLocation);
-#else
         myDir = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
-#endif
     }
     else
     {
@@ -447,8 +488,8 @@ void SubstituteFonts(const QString &language)
 #endif
 }
 
-ToolTipToRichTextFilter::ToolTipToRichTextFilter(int size_threshold, QObject *parent)
-    : QObject(parent), size_threshold(size_threshold)
+ToolTipToRichTextFilter::ToolTipToRichTextFilter(int _size_threshold, QObject *parent)
+    : QObject(parent), size_threshold(_size_threshold)
 {
 }
 
@@ -489,11 +530,7 @@ void TableViewLastColumnResizingFixer::disconnectViewHeadersSignals()
 // Refactored here for readability.
 void TableViewLastColumnResizingFixer::setViewHeaderResizeMode(int logicalIndex, QHeaderView::ResizeMode resizeMode)
 {
-#if QT_VERSION < 0x050000
-    tableView->horizontalHeader()->setResizeMode(logicalIndex, resizeMode);
-#else
     tableView->horizontalHeader()->setSectionResizeMode(logicalIndex, resizeMode);
-#endif
 }
 
 void TableViewLastColumnResizingFixer::resizeColumn(int nColumnIndex, int width)
@@ -578,8 +615,10 @@ void TableViewLastColumnResizingFixer::on_geometriesChanged()
  */
 TableViewLastColumnResizingFixer::TableViewLastColumnResizingFixer(QTableView *table,
     int lastColMinimumWidth,
-    int allColsMinimumWidth)
-    : tableView(table), lastColumnMinimumWidth(lastColMinimumWidth), allColumnsMinimumWidth(allColsMinimumWidth)
+    int allColsMinimumWidth,
+    QObject *parent)
+    : QObject(parent), tableView(table), lastColumnMinimumWidth(lastColMinimumWidth),
+      allColumnsMinimumWidth(allColsMinimumWidth)
 {
     columnCount = tableView->horizontalHeader()->count();
     lastColumnIndex = columnCount - 1;
@@ -851,16 +890,21 @@ void restoreWindowGeometry(const QString &strSetting, const QSize &defaultSize, 
     QSettings settings;
     QPoint pos = settings.value(strSetting + "Pos").toPoint();
     QSize size = settings.value(strSetting + "Size", defaultSize).toSize();
+    QRect screen = QApplication::desktop()->screenGeometry();
+    QPoint posCenter(abs((screen.width() - size.width()) / 2), abs((screen.height() - size.height()) / 2));
 
     if (!pos.x() && !pos.y())
     {
-        QRect screen = QApplication::desktop()->screenGeometry();
-        pos.setX((screen.width() - size.width()) / 2);
-        pos.setY((screen.height() - size.height()) / 2);
+        QRect _screen = QApplication::desktop()->screenGeometry();
+        pos.setX((_screen.width() - size.width()) / 2);
+        pos.setY((_screen.height() - size.height()) / 2);
     }
 
     parent->resize(size);
     parent->move(pos);
+
+    if (QApplication::desktop()->screenNumber(parent) == -1)
+        parent->move(posCenter);
 }
 
 void setClipboard(const QString &str)
@@ -918,11 +962,15 @@ QString formatServicesStr(quint64 mask)
             case NODE_XTHIN:
                 strList.append("XTHIN");
                 break;
-#ifdef BITCOIN_CASH
             case NODE_BITCOIN_CASH:
                 strList.append("CASH");
                 break;
-#endif
+            case NODE_GRAPHENE:
+                strList.append("GRAPH");
+                break;
+            case NODE_WEAKBLOCKS:
+                strList.append("WB");
+                break;
             default:
                 strList.append(QString("%1[%2]").arg("UNKNOWN").arg(check));
             }
@@ -946,4 +994,5 @@ QString formatTimeOffset(int64_t nTimeOffset)
     return QString(QObject::tr("%1 s")).arg(QString::number((int)nTimeOffset, 10));
 }
 
+QString uriPrefix() { return "bitcoincash"; }
 } // namespace GUIUtil

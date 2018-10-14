@@ -1,5 +1,5 @@
 // Copyright (c) 2014-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -14,8 +14,6 @@
 #include "ui_interface.h"
 #include "util.h"
 #include "utilstrencodings.h"
-
-#include <boost/foreach.hpp>
 
 using namespace std;
 
@@ -52,7 +50,7 @@ void AddTimeData(const CNetAddr &ip, int64_t nOffsetSample)
     // Add data
     static CMedianFilter<int64_t> vTimeOffsets(BITCOIN_TIMEDATA_MAX_SAMPLES, 0);
     vTimeOffsets.input(nOffsetSample);
-    LogPrint("net", "added time data, samples %d, offset %+d (%+d minutes)\n", vTimeOffsets.size(), nOffsetSample,
+    LOG(NET, "added time data, samples %d, offset %+d (%+d minutes)\n", vTimeOffsets.size(), nOffsetSample,
         nOffsetSample / 60);
 
     // There is a known issue here (see issue #4521):
@@ -90,7 +88,7 @@ void AddTimeData(const CNetAddr &ip, int64_t nOffsetSample)
             {
                 // If nobody has a time different than ours but within 5 minutes of ours, give a warning
                 bool fMatch = false;
-                BOOST_FOREACH (int64_t nOffset, vSorted)
+                for (int64_t nOffset : vSorted)
                     if (nOffset != 0 && abs64(nOffset) < 5 * 60)
                         fMatch = true;
 
@@ -106,10 +104,10 @@ void AddTimeData(const CNetAddr &ip, int64_t nOffsetSample)
             }
         }
 
-        BOOST_FOREACH (int64_t n, vSorted)
-            LogPrint("net", "%+d  ", n);
-        LogPrint("net", "|  ");
+        for (int64_t n : vSorted)
+            LOG(NET, "%+d  ", n);
+        LOG(NET, "|  ");
 
-        LogPrint("net", "nTimeOffset = %+d  (%+d minutes)\n", nTimeOffset, nTimeOffset / 60);
+        LOG(NET, "nTimeOffset = %+d  (%+d minutes)\n", nTimeOffset, nTimeOffset / 60);
     }
 }

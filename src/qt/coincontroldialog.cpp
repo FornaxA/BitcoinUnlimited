@@ -1,5 +1,5 @@
 // Copyright (c) 2011-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -15,8 +15,10 @@
 #include "walletmodel.h"
 
 #include "coincontrol.h"
+#include "dstencode.h"
 #include "init.h"
 #include "main.h" // For minRelayTxFee
+#include "policy/policy.h"
 #include "wallet/wallet.h"
 
 #include <boost/assign/list_of.hpp> // for 'map_list_of()'
@@ -36,8 +38,8 @@ QList<CAmount> CoinControlDialog::payAmounts;
 CCoinControl *CoinControlDialog::coinControl = new CCoinControl();
 bool CoinControlDialog::fSubtractFeeFromAmount = false;
 
-CoinControlDialog::CoinControlDialog(const PlatformStyle *platformStyle, QWidget *parent)
-    : QDialog(parent), ui(new Ui::CoinControlDialog), model(0), platformStyle(platformStyle)
+CoinControlDialog::CoinControlDialog(const PlatformStyle *_platformStyle, QWidget *parent)
+    : QDialog(parent), ui(new Ui::CoinControlDialog), model(0), platformStyle(_platformStyle)
 {
     ui->setupUi(this);
 
@@ -53,7 +55,7 @@ CoinControlDialog::CoinControlDialog(const PlatformStyle *platformStyle, QWidget
     unlockAction = new QAction(tr("Unlock unspent"), this);
 
     // context menu
-    contextMenu = new QMenu();
+    contextMenu = new QMenu(this);
     contextMenu->addAction(copyAddressAction);
     contextMenu->addAction(copyLabelAction);
     contextMenu->addAction(copyAmountAction);
@@ -107,12 +109,8 @@ CoinControlDialog::CoinControlDialog(const PlatformStyle *platformStyle, QWidget
     connect(ui->treeWidget, SIGNAL(itemChanged(QTreeWidgetItem *, int)), this,
         SLOT(viewItemChanged(QTreeWidgetItem *, int)));
 
-// click on header
-#if QT_VERSION < 0x050000
-    ui->treeWidget->header()->setClickable(true);
-#else
+    // click on header
     ui->treeWidget->header()->setSectionsClickable(true);
-#endif
     connect(ui->treeWidget->header(), SIGNAL(sectionClicked(int)), this, SLOT(headerSectionClicked(int)));
 
     // ok button
@@ -163,15 +161,15 @@ CoinControlDialog::~CoinControlDialog()
     delete ui;
 }
 
-void CoinControlDialog::setModel(WalletModel *model)
+void CoinControlDialog::setModel(WalletModel *_model)
 {
-    this->model = model;
+    this->model = _model;
 
-    if (model && model->getOptionsModel() && model->getAddressTableModel())
+    if (_model && _model->getOptionsModel() && _model->getAddressTableModel())
     {
         updateView();
         updateLabelLocked();
-        CoinControlDialog::updateLabels(model, this);
+        CoinControlDialog::updateLabels(_model, this);
     }
 }
 
@@ -412,18 +410,16 @@ void CoinControlDialog::viewItemChanged(QTreeWidgetItem *item, int column)
             CoinControlDialog::updateLabels(model, this);
     }
 
-// todo: this is a temporary qt5 fix: when clicking a parent node in tree mode, the parent node
-//       including all children are partially selected. But the parent node should be fully selected
-//       as well as the children. Children should never be partially selected in the first place.
-//       Please remove this ugly fix, once the bug is solved upstream.
-#if QT_VERSION >= 0x050000
+    // todo: this is a temporary qt5 fix: when clicking a parent node in tree mode, the parent node
+    //       including all children are partially selected. But the parent node should be fully selected
+    //       as well as the children. Children should never be partially selected in the first place.
+    //       Please remove this ugly fix, once the bug is solved upstream.
     else if (column == COLUMN_CHECKBOX && item->childCount() > 0)
     {
         if (item->checkState(COLUMN_CHECKBOX) == Qt::PartiallyChecked &&
             item->child(0)->checkState(COLUMN_CHECKBOX) == Qt::PartiallyChecked)
             item->setCheckState(COLUMN_CHECKBOX, Qt::Checked);
     }
-#endif
 }
 
 // return human readable label for priority number
@@ -485,7 +481,7 @@ void CoinControlDialog::updateLabels(WalletModel *model, QDialog *dialog)
         {
             CTxOut txout(amount, (CScript)std::vector<unsigned char>(24, 0));
             txDummy.vout.push_back(txout);
-            if (txout.IsDust(::minRelayTxFee))
+            if (txout.IsDust())
                 fDust = true;
         }
     }
@@ -508,7 +504,7 @@ void CoinControlDialog::updateLabels(WalletModel *model, QDialog *dialog)
     coinControl->ListSelected(vCoinControl);
     model->getOutputs(vCoinControl, vOutputs);
 
-    BOOST_FOREACH (const COutput &out, vOutputs)
+    for (const COutput &out : vOutputs)
     {
         // unselect already spent, very unlikely scenario, this could happen
         // when selected are spent elsewhere, like rpc or another computer
@@ -593,10 +589,10 @@ void CoinControlDialog::updateLabels(WalletModel *model, QDialog *dialog)
             if (nChange > 0 && nChange < MIN_CHANGE)
             {
                 CTxOut txout(nChange, (CScript)std::vector<unsigned char>(24, 0));
-                if (txout.IsDust(::minRelayTxFee))
+                if (txout.IsDust())
                 {
                     if (CoinControlDialog::fSubtractFeeFromAmount) // dust-change will be raised until no dust
-                        nChange = txout.GetDustThreshold(::minRelayTxFee);
+                        nChange = txout.GetDustThreshold();
                     else
                     {
                         nPayFee += nChange;
@@ -616,7 +612,7 @@ void CoinControlDialog::updateLabels(WalletModel *model, QDialog *dialog)
     }
 
     // actually update labels
-    int nDisplayUnit = BitcoinUnits::BTC;
+    int nDisplayUnit = BitcoinUnits::BCH;
     if (model && model->getOptionsModel())
         nDisplayUnit = model->getOptionsModel()->getDisplayUnit();
 
@@ -725,7 +721,7 @@ void CoinControlDialog::updateView()
     std::map<QString, std::vector<COutput> > mapCoins;
     model->listCoins(mapCoins);
 
-    BOOST_FOREACH (const PAIRTYPE(QString, std::vector<COutput>) & coins, mapCoins)
+    for (const PAIRTYPE(QString, std::vector<COutput>) & coins : mapCoins)
     {
         QTreeWidgetItem *itemWalletAddress = new QTreeWidgetItem();
         itemWalletAddress->setCheckState(COLUMN_CHECKBOX, Qt::Unchecked);
@@ -753,7 +749,7 @@ void CoinControlDialog::updateView()
         double dPrioritySum = 0;
         int nChildren = 0;
         int nInputSum = 0;
-        BOOST_FOREACH (const COutput &out, coins.second)
+        for (const COutput &out : coins.second)
         {
             int nInputSize = 0;
             nSum += out.tx->vout[out.i].nValue;
@@ -772,10 +768,10 @@ void CoinControlDialog::updateView()
             QString sAddress = "";
             if (ExtractDestination(out.tx->vout[out.i].scriptPubKey, outputAddress))
             {
-                sAddress = QString::fromStdString(CBitcoinAddress(outputAddress).ToString());
+                sAddress = QString::fromStdString(EncodeDestination(outputAddress));
 
-                // if listMode or change => show bitcoin address. In tree mode, address is not shown again for direct
-                // wallet address outputs
+                // if listMode or change => show bitcoin address. In tree mode,
+                // address is not shown again for direct wallet address outputs
                 if (!treeMode || (!(sAddress == sWalletAddress)))
                     itemOutput->setText(COLUMN_ADDRESS, sAddress);
 

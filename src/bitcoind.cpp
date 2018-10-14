@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2016 The Bitcoin developers
+// Copyright (c) 2009-2017 The Bitcoin developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -9,6 +9,8 @@
 
 #include "chainparams.h"
 #include "clientversion.h"
+#include "config.h"
+#include "forks_csv.h"
 #include "fs.h"
 #include "httprpc.h"
 #include "httpserver.h"
@@ -71,6 +73,8 @@ bool AppInit(int argc, char *argv[])
     boost::thread_group threadGroup;
     CScheduler scheduler;
 
+    auto &config = const_cast<Config &>(GetConfig());
+
     bool fRet = false;
 
     //
@@ -110,6 +114,22 @@ bool AppInit(int argc, char *argv[])
         return true;
     }
 
+    // bip135 begin
+    // dump default deployment info and exit, if requested
+    if (GetBoolArg("-dumpforks", false))
+    {
+        std::stringstream ss;
+        ss << "# " << strprintf(_("%s Daemon"), _(PACKAGE_NAME)) << " " << _("version") << " " << FormatFullVersion();
+        ss << "\n" << FORKS_CSV_FILE_HEADER;
+        ss << NetworkDeploymentInfoCSV(CBaseChainParams::MAIN);
+        ss << NetworkDeploymentInfoCSV(CBaseChainParams::UNL);
+        ss << NetworkDeploymentInfoCSV(CBaseChainParams::TESTNET);
+        ss << NetworkDeploymentInfoCSV(CBaseChainParams::REGTEST);
+        std::cout << ss.str();
+        return true;
+    }
+    // bip135 end
+
     try
     {
         if (!fs::is_directory(GetDataDir(false)))
@@ -140,8 +160,14 @@ bool AppInit(int argc, char *argv[])
         // Command-line RPC
         bool fCommandLine = false;
         for (int i = 1; i < argc; i++)
-            if (!IsSwitchChar(argv[i][0]) && !boost::algorithm::istarts_with(argv[i], "bitcoin:"))
+        {
+            if (!IsSwitchChar(argv[i][0]) && !boost::algorithm::istarts_with(argv[i], "bitcoin:") &&
+                !boost::algorithm::istarts_with(argv[i], "bitcoincash:"))
+            {
                 fCommandLine = true;
+                break;
+            }
+        }
 
         if (fCommandLine)
         {
@@ -178,7 +204,7 @@ bool AppInit(int argc, char *argv[])
         // Set this early so that parameter interactions go to console
         InitLogging();
         InitParameterInteraction();
-        fRet = AppInit2(threadGroup, scheduler);
+        fRet = AppInit2(config, threadGroup, scheduler);
     }
     catch (const std::exception &e)
     {
@@ -188,8 +214,6 @@ bool AppInit(int argc, char *argv[])
     {
         PrintExceptionContinue(NULL, "AppInit()");
     }
-
-    UnlimitedSetup();
 
     if (!fRet)
     {

@@ -1,5 +1,5 @@
 // Copyright (c) 2011-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -7,9 +7,9 @@
 
 #include "clientversion.h"
 #include "primitives/transaction.h"
-#include "random.h"
 #include "sync.h"
 #include "test/test_bitcoin.h"
+#include "test/test_random.h"
 #include "utilmoneystr.h"
 #include "utilstrencodings.h"
 
@@ -44,6 +44,103 @@ BOOST_AUTO_TEST_CASE(util_criticalsection)
     } while (0);
 }
 
+
+static volatile int critVal = 0;
+static volatile int readVal = 0;
+static volatile bool threadExited = false;
+static volatile bool threadStarted = false;
+void ThreadSharedCritTest(CSharedCriticalSection *cs)
+{
+    threadStarted = true;
+    READLOCK(*cs);
+    readVal = critVal;
+
+    threadExited = true;
+}
+
+BOOST_AUTO_TEST_CASE(util_sharedcriticalsection)
+{
+    CSharedCriticalSection cs;
+
+    do
+    {
+        READLOCK(cs);
+        break;
+
+        BOOST_ERROR("break was swallowed!");
+    } while (0);
+
+    do
+    {
+        WRITELOCK(cs);
+        break;
+
+        BOOST_ERROR("break was swallowed!");
+    } while (0);
+
+    { // If the read lock does not allow simultaneous locking, this code will hang in the join_all
+        boost::thread_group thrds;
+        READLOCK(cs);
+        thrds.create_thread(boost::bind(ThreadSharedCritTest, &cs));
+        thrds.join_all();
+    }
+
+    { // Ensure that the exclusive lock works
+        threadStarted = false;
+        threadExited = false;
+        readVal = 0;
+        critVal = 1;
+        boost::thread_group thrds;
+        {
+            WRITELOCK(cs);
+            thrds.create_thread(boost::bind(ThreadSharedCritTest, &cs));
+            MilliSleep(250); // give thread a chance to run.
+            BOOST_CHECK(threadStarted == true);
+            BOOST_CHECK(threadExited == false);
+            critVal = 2;
+        }
+        // Now the write lock is released so the thread should read the value.
+        thrds.join_all();
+        BOOST_CHECK(threadExited == true);
+        BOOST_CHECK(readVal == 2);
+    }
+}
+
+
+void ThreadCorralTest(CThreadCorral *c, int region, int *pReadVal, int setVal)
+{
+    CORRAL(*c, region);
+    *pReadVal = critVal;
+    if (setVal != 0)
+        critVal = setVal;
+}
+
+
+BOOST_AUTO_TEST_CASE(util_threadcorral)
+{
+    CThreadCorral corral;
+
+    { // ensure that regions lock out other regions, but not the current region.
+        boost::thread_group thrds;
+        int readVals[3] = {0, 0, 0};
+        {
+            CORRAL(corral, 1);
+            critVal = 1;
+            thrds.create_thread(boost::bind(ThreadCorralTest, &corral, 0, &readVals[0], 4));
+            thrds.create_thread(boost::bind(ThreadCorralTest, &corral, 1, &readVals[1], 0));
+            MilliSleep(500); // Thread 1 should run now because there is no higher region waiting.
+            thrds.create_thread(boost::bind(ThreadCorralTest, &corral, 2, &readVals[2], 3));
+            MilliSleep(500); // give threads a chance to run (if they are going to).
+            critVal = 2;
+        }
+        MilliSleep(1000); // give threads a chance to run (if they are going to).
+        BOOST_CHECK(readVals[1] == 1); // since region 1 was active, thread 1 should have run right away
+        BOOST_CHECK(readVals[2] == 2); // After release, region 2 should have run since its higher priority
+        BOOST_CHECK(readVals[0] == 3); // Finally, region 0 should have run (and gotten the value set by region 2)
+    }
+}
+
+
 static const unsigned char ParseHex_expected[65] = {0x04, 0x67, 0x8a, 0xfd, 0xb0, 0xfe, 0x55, 0x48, 0x27, 0x19, 0x67,
     0xf1, 0xa6, 0x71, 0x30, 0xb7, 0x10, 0x5c, 0xd6, 0xa8, 0x28, 0xe0, 0x39, 0x09, 0xa6, 0x79, 0x62, 0xe0, 0xea, 0x1f,
     0x61, 0xde, 0xb6, 0x49, 0xf6, 0xbc, 0x3f, 0x4c, 0xef, 0x38, 0xc4, 0xf3, 0x55, 0x04, 0xe5, 0x1e, 0xc1, 0x12, 0xde,
@@ -57,7 +154,17 @@ BOOST_AUTO_TEST_CASE(util_DbgAssert)
     fPrintToConsole = true;
     DbgAssert(1, i = 1);
     BOOST_CHECK(i == 0);
+
+    // prevent debug output for this failing (on purpose) DbgAssert
+    bool fPrintToConsole_bak = fPrintToConsole;
+    bool fPrintToDebugLog_bak = fPrintToDebugLog;
+    fPrintToConsole = fPrintToDebugLog = false;
+
     DbgAssert(0, i = 1);
+
+    fPrintToDebugLog = fPrintToDebugLog_bak;
+    fPrintToConsole = fPrintToConsole_bak;
+
     BOOST_CHECK(i == 1);
     fPrintToConsole = savedVal;
 #endif
@@ -541,6 +648,179 @@ BOOST_AUTO_TEST_CASE(test_ParseFixedPoint)
     BOOST_CHECK(!ParseFixedPoint("1.1e", 8, &amount));
     BOOST_CHECK(!ParseFixedPoint("1.1e-", 8, &amount));
     BOOST_CHECK(!ParseFixedPoint("1.", 8, &amount));
+}
+
+template <int F, int T>
+static void CheckConvertBits(const std::vector<uint8_t> &in, const std::vector<uint8_t> &expected)
+{
+    std::vector<uint8_t> outpad;
+    bool ret = ConvertBits<F, T, true>(outpad, in.begin(), in.end());
+    BOOST_CHECK(ret);
+    BOOST_CHECK(outpad == expected);
+
+    const bool dopad = (in.size() * F) % T;
+    std::vector<uint8_t> outnopad;
+    ret = ConvertBits<F, T, false>(outnopad, in.begin(), in.end());
+    BOOST_CHECK(ret != dopad);
+
+    if (dopad)
+    {
+        // We should have skipped the last digit.
+        outnopad.push_back(expected.back());
+    }
+
+    BOOST_CHECK(outnopad == expected);
+
+    // Check the other way around.
+    std::vector<uint8_t> orignopad;
+    ret = ConvertBits<T, F, false>(orignopad, expected.begin(), expected.end());
+    BOOST_CHECK(ret == !((expected.size() * T) % F));
+    BOOST_CHECK(orignopad == in);
+
+    // Check with padding. We may get an extra 0 in that case.
+    std::vector<uint8_t> origpad;
+    ret = ConvertBits<T, F, true>(origpad, expected.begin(), expected.end());
+    BOOST_CHECK(ret);
+
+    if (dopad)
+    {
+        BOOST_CHECK_EQUAL(origpad.back(), 0);
+        origpad.pop_back();
+    }
+
+    BOOST_CHECK(origpad == in);
+}
+
+BOOST_AUTO_TEST_CASE(test_ConvertBits)
+{
+    CheckConvertBits<8, 5>({}, {});
+    CheckConvertBits<8, 5>({0xff}, {0x1f, 0x1c});
+    CheckConvertBits<8, 5>({0xff, 0xff}, {0x1f, 0x1f, 0x1f, 0x10});
+    CheckConvertBits<8, 5>({0xff, 0xff, 0xff}, {0x1f, 0x1f, 0x1f, 0x1f, 0x1e});
+    CheckConvertBits<8, 5>({0xff, 0xff, 0xff, 0xff}, {0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x18});
+    CheckConvertBits<8, 5>({0xff, 0xff, 0xff, 0xff, 0xff}, {0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f});
+    CheckConvertBits<8, 5>({0xff, 0xff, 0xff, 0xff, 0xff}, {0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f});
+    CheckConvertBits<8, 5>({0xff, 0xff, 0xff, 0xff, 0xff}, {0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f});
+    CheckConvertBits<8, 5>({0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef},
+        {0x00, 0x04, 0x11, 0x14, 0x0a, 0x19, 0x1c, 0x09, 0x15, 0x0f, 0x06, 0x1e, 0x1e});
+}
+
+// Log tests:
+bool TestSetLog(uint64_t categoriesExpected, const char *arg1, const char *arg2 = NULL)
+{
+    UniValue logargs(UniValue::VARR);
+    bool ret = false;
+    logargs.push_back(arg1);
+    if (arg2 != NULL)
+        logargs.push_back(arg2);
+
+    setlog(logargs, false); // The function to be tested
+
+    if (categoriesExpected == Logging::categoriesEnabled)
+        ret = true;
+
+    // LOGA("TestSetLog %s %s ret: %d\n", arg1, ((arg2 == NULL)?"":arg2),(int)ret);
+    return ret;
+}
+
+bool IsStringTrueBadArgTest(const char *arg1)
+{
+    try
+    {
+        IsStringTrue(arg1);
+    }
+    catch (...)
+    {
+        return true; // If bad arg return true
+    }
+    return false;
+}
+
+BOOST_AUTO_TEST_CASE(util_Logging)
+{
+    {
+        using namespace Logging;
+        BOOST_CHECK_EQUAL(8, sizeof(categoriesEnabled));
+        BOOST_CHECK_EQUAL(NONE, categoriesEnabled);
+        LogToggleCategory(THIN, true);
+        BOOST_CHECK(LogAcceptCategory(THIN));
+        LogToggleCategory(THIN, false);
+        BOOST_CHECK(!LogAcceptCategory(THIN));
+        LogToggleCategory(THIN, true);
+        LogToggleCategory(NET, true);
+        BOOST_CHECK(LogAcceptCategory(THIN | NET));
+        LogToggleCategory(ALL, true);
+        BOOST_CHECK_EQUAL(ALL, categoriesEnabled);
+        LogToggleCategory(ALL, false);
+        BOOST_CHECK_EQUAL(NONE, categoriesEnabled);
+        BOOST_CHECK_EQUAL(LogGetLabel(ADDRMAN), "addrman");
+        BOOST_CHECK(TestSetLog(ALL, "all", "on"));
+        BOOST_CHECK(TestSetLog(NONE, "all", "off"));
+        BOOST_CHECK(TestSetLog(NONE, "tor"));
+        BOOST_CHECK(TestSetLog(TOR, "tor", "on"));
+        BOOST_CHECK(TestSetLog(NONE, "tor", "off"));
+        BOOST_CHECK(!TestSetLog(TOR, "tor", "bad-arg"));
+        BOOST_CHECK(TestSetLog(categoriesEnabled, "badcategory", "on"));
+        LogToggleCategory(ALL, true);
+        LOG(THIN, "missing args %s %d\n");
+        LOG(THIN, "wrong order args %s %d\n", 3, "hello");
+        LOG(THIN, "null arg %s\n", NULL);
+        BOOST_CHECK(IsStringTrue("true"));
+        BOOST_CHECK(IsStringTrue("enable"));
+        BOOST_CHECK(IsStringTrue("1"));
+        BOOST_CHECK(IsStringTrue("on"));
+        BOOST_CHECK(!IsStringTrue("false"));
+        BOOST_CHECK(!IsStringTrue("disable"));
+        BOOST_CHECK(!IsStringTrue("0"));
+        BOOST_CHECK(!IsStringTrue("off"));
+        BOOST_CHECK(IsStringTrueBadArgTest("bad"));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(util_wildmatch)
+{
+    BOOST_CHECK(wildmatch("123", "123"));
+    BOOST_CHECK(wildmatch("", ""));
+    BOOST_CHECK(wildmatch("?", "?"));
+    BOOST_CHECK(wildmatch("?", "x"));
+    BOOST_CHECK(wildmatch("*", "123"));
+    BOOST_CHECK(!wildmatch("456", "123"));
+
+    // multi-star pattern is not allowed
+    BOOST_CHECK(!wildmatch("**", "123"));
+    BOOST_CHECK(!wildmatch("************************************", "123"));
+    BOOST_CHECK(!wildmatch("?*?*?*?*?*?*?*?*?*?*?*?*?*?*?*?*?*?", "123"));
+
+    BOOST_CHECK(wildmatch("????", "1234"));
+    BOOST_CHECK(wildmatch("????a?b?", "1234a5b6"));
+    BOOST_CHECK(!wildmatch("????a?b?", "1234a5c6"));
+    BOOST_CHECK(wildmatch("123*", "123456"));
+    BOOST_CHECK(wildmatch("123*456", "123acdef456"));
+    BOOST_CHECK(wildmatch("*123", "abcdef123"));
+
+    // length limit check
+    BOOST_CHECK(!wildmatch(std::string("*", 10000), ""));
+    BOOST_CHECK(!wildmatch("*", std::string("x", 10000)));
+}
+
+BOOST_AUTO_TEST_CASE(splitbycommaandremovespaces)
+{
+    std::vector<std::string> inp1{"one", "two, three  ", "f o u r"};
+
+    const std::vector<std::string> r = splitByCommasAndRemoveSpaces(inp1);
+
+    BOOST_CHECK_EQUAL(r.size(), 4);
+    BOOST_CHECK_EQUAL(r[0], "one");
+    BOOST_CHECK_EQUAL(r[1], "two");
+    BOOST_CHECK_EQUAL(r[2], "three");
+    BOOST_CHECK_EQUAL(r[3], "four");
+
+    const std::vector<std::string> r2 = splitByCommasAndRemoveSpaces(r);
+    BOOST_CHECK_EQUAL(r.size(), 4);
+    BOOST_CHECK_EQUAL(r[0], "one");
+    BOOST_CHECK_EQUAL(r[1], "two");
+    BOOST_CHECK_EQUAL(r[2], "three");
+    BOOST_CHECK_EQUAL(r[3], "four");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

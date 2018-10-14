@@ -6,8 +6,8 @@
 #include "coins.h"
 #include "consensus/validation.h"
 #include "main.h"
-#include "random.h"
 #include "test/test_bitcoin.h"
+#include "test/test_random.h"
 #include "uint256.h"
 #include "undo.h"
 
@@ -63,7 +63,10 @@ public:
     }
 
     uint256 GetBestBlock() const { return hashBestBlock_; }
-    bool BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, size_t &nChildCachedCoinsUsage)
+    bool BatchWrite(CCoinsMap &mapCoins,
+        const uint256 &hashBlock,
+        const uint64_t nBestCoinHeight,
+        size_t &nChildCachedCoinsUsage)
     {
         for (CCoinsMap::iterator it = mapCoins.begin(); it != mapCoins.end();)
         {
@@ -93,7 +96,7 @@ public:
 class CCoinsViewCacheTest : public CCoinsViewCache
 {
 public:
-    explicit CCoinsViewCacheTest(CCoinsView *base) : CCoinsViewCache(base) {}
+    explicit CCoinsViewCacheTest(CCoinsView *_base) : CCoinsViewCache(_base) {}
     void SelfTest() const
     {
         // Manually recompute the dynamic usage of the whole data, and compare it.
@@ -161,9 +164,12 @@ BOOST_AUTO_TEST_CASE(coins_cache_simulation_test)
         {
             uint256 txid = txids[insecure_rand() % txids.size()]; // txid we're going to modify in this iteration.
             Coin &coin = result[COutPoint(txid, 0)];
-            const Coin &entry = (insecure_rand() % 500 == 0) ? AccessByTxid(*stack.back(), txid) :
-                                                               stack.back()->AccessCoin(COutPoint(txid, 0));
-            BOOST_CHECK(coin == entry);
+            {
+                LOCK(stack.back()->cs_utxo);
+                const Coin &entry = (insecure_rand() % 500 == 0) ? AccessByTxid(*stack.back(), txid) :
+                                                                   stack.back()->AccessCoin(COutPoint(txid, 0));
+                BOOST_CHECK(coin == entry);
+            }
 
             if (insecure_rand() % 5 == 0 || coin.IsSpent())
             {
@@ -202,43 +208,54 @@ BOOST_AUTO_TEST_CASE(coins_cache_simulation_test)
             uncached_an_entry |= !stack[cacheid]->HaveCoinInCache(out);
         }
 
+        // One every 500 iterations, trim a random cache to zero
+        if (insecure_rand() % 500)
+        {
+            int cacheid = insecure_rand() % stack.size();
+            stack[cacheid]->Trim(0);
+        }
+
         // Once every 1000 iterations and at the end, verify the full cache.
         if (insecure_rand() % 1000 == 1 || i == NUM_SIMULATION_ITERATIONS - 1)
         {
             for (auto it = result.begin(); it != result.end(); it++)
             {
                 bool have = stack.back()->HaveCoin(it->first);
-                const Coin &coin = stack.back()->AccessCoin(it->first);
-                BOOST_CHECK(have == !coin.IsSpent());
-                BOOST_CHECK(coin == it->second);
-                if (coin.IsSpent())
                 {
-                    missed_an_entry = true;
-                }
-                else
-                {
-                    BOOST_CHECK(stack.back()->HaveCoinInCache(it->first));
-                    found_an_entry = true;
+                    LOCK(stack.back()->cs_utxo);
+                    const Coin &coin = stack.back()->AccessCoin(it->first);
+                    BOOST_CHECK(have == !coin.IsSpent());
+                    BOOST_CHECK(coin == it->second);
+                    if (coin.IsSpent())
+                    {
+                        missed_an_entry = true;
+                    }
+                    else
+                    {
+                        BOOST_CHECK(stack.back()->HaveCoinInCache(it->first));
+                        found_an_entry = true;
+                    }
                 }
             }
-            BOOST_FOREACH (const CCoinsViewCacheTest *test, stack)
+            for (const CCoinsViewCacheTest *test : stack)
             {
                 test->SelfTest();
             }
         }
 
+        // Every 100 iterations, flush an intermediate cache
         if (insecure_rand() % 100 == 0)
         {
-            // Every 100 iterations, flush an intermediate cache
             if (stack.size() > 1 && insecure_rand() % 2 == 0)
             {
                 unsigned int flushIndex = insecure_rand() % (stack.size() - 1);
                 stack[flushIndex]->Flush();
             }
         }
-        if (insecure_rand() % 100 == 0)
+
+        // Every 50 iterations, change the cache stack.
+        if (insecure_rand() % 50 == 0)
         {
-            // Every 100 iterations, change the cache stack.
             if (stack.size() > 0 && insecure_rand() % 2 == 0)
             {
                 // Remove the top cache
@@ -452,7 +469,8 @@ void WriteCoinsViewEntry(CCoinsView &view, CAmount value, char flags)
     uint256 hash;
     hash.SetNull();
     size_t cacheusage = 0;
-    view.BatchWrite(map, hash, cacheusage);
+    uint64_t bestCoinHeight = 0;
+    view.BatchWrite(map, hash, bestCoinHeight, cacheusage);
 }
 
 class SingleEntryCacheTest
@@ -476,6 +494,8 @@ void CheckAccessCoin(CAmount base_value,
     char expected_flags)
 {
     SingleEntryCacheTest test(base_value, cache_value, cache_flags);
+
+    LOCK(test.cache.cs_utxo);
     test.cache.AccessCoin(OUTPOINT);
     test.cache.SelfTest();
 

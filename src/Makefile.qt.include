@@ -1,3 +1,7 @@
+# Copyright (c) 2013-2016 The Bitcoin Core developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
 bin_PROGRAMS += qt/bitcoin-qt
 EXTRA_LIBRARIES += qt/libbitcoinqt.a
 
@@ -262,6 +266,8 @@ RES_ICONS = \
   qt/res/icons/filesave.png \
   qt/res/icons/fontbigger.png \
   qt/res/icons/fontsmaller.png \
+  qt/res/icons/hd_disabled.png \
+  qt/res/icons/hd_enabled.png \
   qt/res/icons/history.png \
   qt/res/icons/info.png \
   qt/res/icons/key.png \
@@ -344,7 +350,8 @@ BITCOIN_QT_CPP += \
   qt/walletview.cpp
 endif
 
-RES_IMAGES = 
+RES_IMAGES =  \
+  qt/res/images/splashscreen.png
 
 RES_MOVIES = $(wildcard qt/res/movies/spinner-*.png)
 

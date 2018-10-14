@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2016 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -27,7 +27,7 @@ ReceiveFreezeDialog::ReceiveFreezeDialog(QWidget *parent) : QDialog(parent), ui(
 }
 
 ReceiveFreezeDialog::~ReceiveFreezeDialog() { delete ui; }
-void ReceiveFreezeDialog::setModel(OptionsModel *model) { this->model = model; }
+void ReceiveFreezeDialog::setModel(OptionsModel *_model) { this->model = _model; }
 void ReceiveFreezeDialog::on_freezeDateTime_editingFinished()
 {
     if (ui->freezeDateTime->dateTime() > ui->freezeDateTime->minimumDateTime())

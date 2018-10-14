@@ -1,6 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -12,6 +12,7 @@
 #include "compat.h"
 #include "fs.h"
 #include "hash.h"
+#include "iblt.h"
 #include "limitedmap.h"
 #include "netbase.h"
 #include "primitives/block.h"
@@ -29,7 +30,6 @@
 #include <arpa/inet.h>
 #endif
 
-#include <boost/foreach.hpp>
 #include <boost/signals2/signal.hpp>
 
 #include "banentry.h"
@@ -79,11 +79,9 @@ static const size_t SETASKFOR_MAX_SZ = 2 * MAX_INV_SZ;
 /** The maximum number of peer connections to maintain. */
 static const unsigned int DEFAULT_MAX_PEER_CONNECTIONS = 125;
 /** BU: The maximum numer of outbound peer connections */
-static const unsigned int DEFAULT_MAX_OUTBOUND_CONNECTIONS = 12;
+static const unsigned int DEFAULT_MAX_OUTBOUND_CONNECTIONS = 16;
 /** BU: The minimum number of xthin nodes to connect */
 static const uint8_t MIN_XTHIN_NODES = 8;
-/** BU: The minimum number of BitcoinCash nodes to connect */
-static const uint8_t MIN_BITCOIN_CASH_NODES = 4;
 /** BU: The daily maximum disconnects while searching for xthin nodes to connect */
 static const unsigned int MAX_DISCONNECTS = 200;
 /** The default for -maxuploadtarget. 0 = Unlimited */
@@ -145,7 +143,7 @@ struct CNodeSignals
     boost::signals2::signal<int()> GetHeight;
     boost::signals2::signal<bool(CNode *), CombinerAll> ProcessMessages;
     boost::signals2::signal<bool(CNode *), CombinerAll> SendMessages;
-    boost::signals2::signal<void(NodeId, const CNode *)> InitializeNode;
+    boost::signals2::signal<void(const CNode *)> InitializeNode;
     boost::signals2::signal<void(NodeId)> FinalizeNode;
 };
 
@@ -190,14 +188,11 @@ extern CAddrMan addrman;
 extern int nMaxConnections;
 /** The minimum number of xthin nodes to connect to */
 extern int nMinXthinNodes;
-/** The minimum number of BitcoinCash nodes to connect to */
-extern int nMinBitcoinCashNodes;
 extern std::vector<CNode *> vNodes;
 extern CCriticalSection cs_vNodes;
-extern std::map<CInv, CDataStream> mapRelay;
+extern std::map<CInv, CTransactionRef> mapRelay;
 extern std::deque<std::pair<int64_t, CInv> > vRelayExpiration;
 extern CCriticalSection cs_mapRelay;
-extern limitedmap<uint256, int64_t> mapAlreadyAskedFor;
 
 extern std::vector<std::string> vAddedNodes;
 extern CCriticalSection cs_vAddedNodes;
@@ -295,6 +290,10 @@ public:
 /** Information about a peer */
 class CNode
 {
+#ifdef ENABLE_MUTRACE
+    friend class CPrintSomePointers;
+#endif
+
 public:
     struct CThinBlockInFlight
     {
@@ -302,6 +301,18 @@ public:
         bool fReceived;
 
         CThinBlockInFlight()
+        {
+            nRequestTime = GetTime();
+            fReceived = false;
+        }
+    };
+
+    struct CGrapheneBlockInFlight
+    {
+        int64_t nRequestTime;
+        bool fReceived;
+
+        CGrapheneBlockInFlight()
         {
             nRequestTime = GetTime();
             fReceived = false;
@@ -353,7 +364,8 @@ public:
     bool fVerackSent;
     bool fBUVersionSent;
     bool fSuccessfullyConnected;
-    bool fDisconnect;
+    std::atomic<bool> fDisconnect;
+    std::atomic<bool> fDisconnectRequest;
     // We use fRelayTxes for two purposes -
     // a) it allows us to not relay tx invs before receiving the peer's version message
     // b) the peer may tell us in its version message that we should not relay tx invs
@@ -379,18 +391,47 @@ public:
     CBlock thinBlock;
     std::vector<uint256> thinBlockHashes;
     std::vector<uint64_t> xThinBlockHashes;
-    std::map<uint64_t, CTransaction> mapMissingTx;
+    std::map<uint64_t, CTransactionRef> mapMissingTx;
     uint64_t nLocalThinBlockBytes; // the bytes used in creating this thinblock, updated dynamically
     int nSizeThinBlock; // Original on-wire size of the block. Just used for reporting
     int thinBlockWaitingForTxns; // if -1 then not currently waiting
-    CCriticalSection cs_mapthinblocksinflight; // lock mapThinBlocksInFlight
-    std::map<uint256, CThinBlockInFlight> mapThinBlocksInFlight; // thin blocks in flight and the time requested.
+
+    // thin blocks in flight and the time they were requested.
+    CCriticalSection cs_mapthinblocksinflight;
+    std::map<uint256, CThinBlockInFlight> mapThinBlocksInFlight GUARDED_BY(cs_mapthinblocksinflight);
+
     double nGetXBlockTxCount; // Count how many get_xblocktx requests are made
     uint64_t nGetXBlockTxLastTime; // The last time a get_xblocktx request was made
     double nGetXthinCount; // Count how many get_xthin requests are made
     uint64_t nGetXthinLastTime; // The last time a get_xthin request was made
     uint32_t nXthinBloomfilterSize; // The maximum xthin bloom filter size (in bytes) that our peer will accept.
     // BUIP010 Xtreme Thinblocks: end section
+
+    // BUIPXXX Graphene blocks: begin section
+    CBlock grapheneBlock;
+    std::vector<uint256> grapheneBlockHashes;
+    std::map<uint64_t, uint32_t> grapheneMapHashOrderIndex;
+    std::map<uint64_t, CTransaction> mapGrapheneMissingTx;
+    uint64_t nLocalGrapheneBlockBytes; // the bytes used in creating this graphene block, updated dynamically
+    int nSizeGrapheneBlock; // Original on-wire size of the block. Just used for reporting
+    int grapheneBlockWaitingForTxns; // if -1 then not currently waiting
+    CCriticalSection cs_grapheneadditionaltxs; // lock grapheneAdditionalTxs
+    std::vector<CTransactionRef> grapheneAdditionalTxs; // entire transactions included in graphene block
+
+    // graphene blocks in flight and the time they were requested.
+    CCriticalSection cs_mapgrapheneblocksinflight;
+    std::map<uint256, CGrapheneBlockInFlight> mapGrapheneBlocksInFlight GUARDED_BY(cs_mapgrapheneblocksinflight);
+
+    double nGetGrapheneBlockTxCount; // Count how many get_xblocktx requests are made
+    uint64_t nGetGrapheneBlockTxLastTime; // The last time a get_xblocktx request was made
+    double nGetGrapheneCount; // Count how many get_graphene requests are made
+    uint64_t nGetGrapheneLastTime; // The last time a get_graphene request was made
+    uint32_t nGrapheneBloomfilterSize; // The maximum graphene bloom filter size (in bytes) that our peer will accept.
+    // BUIPXXX Graphene blocks: end section
+
+    CCriticalSection cs_nAvgBlkResponseTime;
+    double nAvgBlkResponseTime;
+    std::atomic<int64_t> nMaxBlocksInTransit;
 
     unsigned short addrFromPort;
 
@@ -417,8 +458,6 @@ public:
     CRollingBloomFilter filterInventoryKnown;
     std::vector<CInv> vInventoryToSend;
     CCriticalSection cs_inventory;
-    std::set<uint256> setAskFor;
-    std::multimap<int64_t, CInv> mapAskFor;
     int64_t nNextInvSend;
     // Used for headers announcements - unfiltered blocks to relay
     // Also protected by cs_inventory
@@ -458,8 +497,6 @@ public:
 
 
     CNode(SOCKET hSocketIn, const CAddress &addrIn, const std::string &addrNameIn = "", bool fInboundIn = false);
-    // Whether the node uses the bitcoin cash magic to communicate.
-    std::atomic<bool> fUsesCashMagic;
     ~CNode();
 
 private:
@@ -490,7 +527,7 @@ public:
     unsigned int GetTotalRecvSize()
     {
         unsigned int total = 0;
-        BOOST_FOREACH (const CNetMessage &msg, vRecvMsg)
+        for (const CNetMessage &msg : vRecvMsg)
             total += msg.vRecv.size() + 24;
         return total;
     }
@@ -502,13 +539,13 @@ public:
     void SetRecvVersion(int nVersionIn)
     {
         nRecvVersion = nVersionIn;
-        BOOST_FOREACH (CNetMessage &msg, vRecvMsg)
+        for (CNetMessage &msg : vRecvMsg)
             msg.SetVersion(nVersionIn);
     }
 
     const CMessageHeader::MessageStartChars &GetMagic(const CChainParams &params) const
     {
-        return fUsesCashMagic ? params.CashMessageStart() : params.MessageStart();
+        return params.CashMessageStart();
     }
 
     CNode *AddRef()
@@ -517,7 +554,12 @@ public:
         return this;
     }
 
-    void Release() { nRefCount--; }
+    void Release()
+    {
+        DbgAssert(nRefCount > 0, );
+        nRefCount--;
+    }
+
     // BUIP010:
     bool ThinBlockCapable()
     {
@@ -526,29 +568,29 @@ public:
         return false;
     }
 
-    // BUIP055:
-    bool BitcoinCashCapable()
+    // BUIPXXX:
+    bool GrapheneCapable()
     {
-        if (nServices & NODE_BITCOIN_CASH)
+        if (nServices & NODE_GRAPHENE)
             return true;
         return false;
     }
 
-    void AddAddressKnown(const CAddress &addr) { addrKnown.insert(addr.GetKey()); }
-    void PushAddress(const CAddress &addr)
+    void AddAddressKnown(const CAddress &_addr) { addrKnown.insert(_addr.GetKey()); }
+    void PushAddress(const CAddress &_addr, FastRandomContext &insecure_rand)
     {
         // Known checking here is only to save space from duplicates.
         // SendMessages will filter it again for knowns that were added
         // after addresses were pushed.
-        if (addr.IsValid() && !addrKnown.contains(addr.GetKey()))
+        if (_addr.IsValid() && !addrKnown.contains(_addr.GetKey()))
         {
             if (vAddrToSend.size() >= MAX_ADDR_TO_SEND)
             {
-                vAddrToSend[insecure_rand() % vAddrToSend.size()] = addr;
+                vAddrToSend[insecure_rand.rand32() % vAddrToSend.size()] = _addr;
             }
             else
             {
-                vAddrToSend.push_back(addr);
+                vAddrToSend.push_back(_addr);
             }
         }
     }
@@ -577,8 +619,6 @@ public:
         LOCK(cs_inventory);
         vBlockHashesToAnnounce.push_back(hash);
     }
-
-    void AskFor(const CInv &inv);
 
     // TODO: Document the postcondition of this function.  Is cs_vSend locked?
     void BeginMessage(const char *pszCommand) EXCLUSIVE_LOCK_FUNCTION(cs_vSend);
@@ -804,6 +844,19 @@ public:
         return idstr;
     }
 
+    //! Disconnects after receiving all the blocks we are waiting for.  Typically this happens if the node is
+    // responding slowly compared to other nodes.
+    void InitiateGracefulDisconnect()
+    {
+        if (!fDisconnectRequest)
+        {
+            fDisconnectRequest = true;
+            // But we need to make sure this connection is actually alive by attempting a send
+            // otherwise there is no reason to wait (up to PING_INTERVAL seconds).
+            // If the other side of a TCP connection goes silent you need to do a send to find out that its dead.
+            fPingQueued = true;
+        }
+    }
 
     void copyStats(CNodeStats &stats);
 
@@ -882,8 +935,7 @@ private:
 typedef std::vector<CNodeRef> VNodeRefs;
 
 class CTransaction;
-void RelayTransaction(const CTransaction &tx);
-void RelayTransaction(const CTransaction &tx, const CDataStream &ss);
+void RelayTransaction(const CTransactionRef &ptx, const bool fRespend = false);
 
 /** Access to the (IP) address database (peers.dat) */
 class CAddrDB

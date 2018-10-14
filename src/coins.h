@@ -1,6 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -18,7 +18,6 @@
 #include <assert.h>
 #include <stdint.h>
 
-#include <boost/foreach.hpp>
 #include <boost/thread/locks.hpp>
 #include <boost/thread/shared_mutex.hpp>
 
@@ -111,12 +110,7 @@ private:
 public:
     SaltedOutpointHasher();
 
-    /**
-     * This *must* return size_t. With Boost 1.46 on 32-bit systems the
-     * unordered_map will behave unpredictably if the custom hasher returns a
-     * uint64_t, resulting in failures when syncing the chain (#4634).
-     */
-    size_t operator()(const COutPoint &id) const { return SipHashUint256Extra(k0, k1, id.hash, id.n); }
+    uint64_t operator()(const COutPoint &id) const { return SipHashUint256Extra(k0, k1, id.hash, id.n); }
 };
 
 struct CCoinsCacheEntry
@@ -175,7 +169,10 @@ public:
 
     //! Do a bulk modification (multiple Coin changes + BestBlock change).
     //! The passed mapCoins can be modified.
-    virtual bool BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, size_t &nChildCachedCoinsUsage);
+    virtual bool BatchWrite(CCoinsMap &mapCoins,
+        const uint256 &hashBlock,
+        const uint64_t bestCoinHeight,
+        size_t &nChildCachedCoinsUsage);
 
     //! Get a cursor to iterate over the whole state
     virtual CCoinsViewCursor *Cursor() const;
@@ -199,7 +196,10 @@ public:
     bool HaveCoin(const COutPoint &outpoint) const override;
     uint256 GetBestBlock() const override;
     void SetBackend(CCoinsView &viewIn);
-    bool BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, size_t &nChildCachedCoinsUsage) override;
+    bool BatchWrite(CCoinsMap &mapCoins,
+        const uint256 &hashBlock,
+        const uint64_t nBestCoinHeight,
+        size_t &nChildCachedCoinsUsage) override;
     CCoinsViewCursor *Cursor() const override;
     size_t EstimateSize() const override;
 };
@@ -214,10 +214,12 @@ protected:
      * declared as "const".
      */
     mutable uint256 hashBlock;
+    mutable uint64_t nBestCoinHeight;
     mutable CCoinsMap cacheCoins;
 
     /* Cached dynamic memory usage for the inner Coin objects. */
     mutable size_t cachedCoinsUsage;
+
 
 public:
     CCoinsViewCache(CCoinsView *baseIn);
@@ -227,7 +229,10 @@ public:
     bool HaveCoin(const COutPoint &outpoint) const;
     uint256 GetBestBlock() const;
     void SetBestBlock(const uint256 &hashBlock);
-    bool BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, size_t &nChildCachedCoinsUsage);
+    bool BatchWrite(CCoinsMap &mapCoins,
+        const uint256 &hashBlock,
+        const uint64_t nBestCoinHeight,
+        size_t &nChildCachedCoinsUsage);
 
     /**
      * Check if we have the given utxo already loaded in this cache.
@@ -264,6 +269,15 @@ public:
     bool Flush();
 
     /**
+     * Empty the coins cache. Used primarily when we're shutting down and want to release memory
+     */
+    void Clear()
+    {
+        LOCK(cs_utxo);
+        cacheCoins.clear();
+    }
+
+    /**
      * Remove excess entries from this cache.
      * Entries are trimmed starting from the beginning of the map.  In this way if those entries
      * are needed later they will all be collocated near the the beginning of the leveldb database
@@ -276,6 +290,12 @@ public:
      * not modified.
      */
     void Uncache(const COutPoint &outpoint);
+
+    /**
+     * Removes all the UTXO outpoints for a given transaction, if they are
+     * not modified.
+     */
+    void UncacheTx(const CTransaction &tx);
 
     //! Calculate the size of the cache (in number of transaction outputs)
     unsigned int GetCacheSize() const;

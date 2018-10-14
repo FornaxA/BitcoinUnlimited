@@ -19,12 +19,12 @@ pkg_add python # (select version 2.7.x, not 3.x)
 ln -sf /usr/local/bin/python2.7 /usr/local/bin/python2
 ```
 
-The default C++ compiler that comes with OpenBSD 5.7 is g++ 4.2. This version is old (from 2007), and is not able to compile the current version of Bitcoin Unlimited. It is possible to patch it up to compile, but with the planned transition to C++11 this is a losing battle. So here we will be installing a newer compiler.
+See [dependencies.md](dependencies.md) for a complete overview.
 
 GCC
 -------
 
-You can install a newer version of gcc with:
+The default C++ compiler that comes with OpenBSD 5.9 is g++ 4.2. This version is old (from 2007), and is not able to compile the current version of Bitcoin Core, primarily as it has no C++11 support, but even before there were issues. So here we will be installing a newer compiler:
 
 ```bash
 pkg_add g++ # (select newest 4.x version, e.g. 4.9.2)
@@ -132,7 +132,7 @@ Clang (not currently working)
 
 Using a newer g++ results in linking the new code to a new libstdc++.
 Libraries built with the old g++, will still import the old library.
-This gives conflicts, necessitating rebuild of all C++ dependencies of the application.
+This produces conflicts, necessitating rebuild of all C++ dependencies of the application.
 
 With clang this can - at least theoretically - be avoided because it uses the
 base system's libstdc++.

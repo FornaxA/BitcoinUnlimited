@@ -1,6 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -159,6 +159,22 @@ extern const char *GET_XBLOCKTX;
  * BUIP010 Xtreme Thinblocks: The get_xthin message transmits a single serialized get_xthin.
  */
 extern const char *GET_XTHIN;
+/**
+ * The grapheneblock message transmits a single serialized graphene block.
+ */
+extern const char *GRAPHENEBLOCK;
+/**
+ * The graphenetx message transmits a single serialized grblktx.
+ */
+extern const char *GRAPHENETX;
+/**
+ * The get_graphenetx message transmits a single serialized get_grblktx.
+ */
+extern const char *GET_GRAPHENETX;
+/**
+ * The get_graphene message transmits a single serialized get_grblk.
+ */
+extern const char *GET_GRAPHENE;
 
 /**
  * The getaddr message requests an addr message from the receiving node,
@@ -295,27 +311,32 @@ enum
     // BU: Bitcoin Unlimitd does not support this (added to display connected node services correctly)
     NODE_WITNESS = (1 << 3),
 
-    // BUIP010 - Xtreme Thinblocks - begin section
     // NODE_XTHIN means the node supports Xtreme Thinblocks
     // If this is turned off then the node will not service xthin requests nor
     // make xthin requests
     NODE_XTHIN = (1 << 4),
-    // BUIP010 - Xtreme Thinblocks - end section
 
-    // BUIP055 - UAHF
-    // NODE_UAHF means the node supports the UAHF hard fork.  This is intended to be just
+    // UAHF
+    // NODE_BITCOIN_CASH means the node supports the UAHF hard fork.  This is intended to be just
     // a temporary service bit until the fork actually happens.  After the for it can be
     // removed.
     // If this is turned off then the node will not follow the UAHF hardfork
     NODE_BITCOIN_CASH = (1 << 5),
 
+    // NODE_GRAPHENE means the node supports Graphene blocks
+    // If this is turned off then the node will not service graphene requests nor
+    // make graphene requests
+    NODE_GRAPHENE = (1 << 6),
+
     // Bits 24-31 are reserved for temporary experiments. Just pick a bit that
     // isn't getting used, or one not being used much, and notify the
-    // bitcoin-development mailing list. Remember that service bits are just
+    // Bitcoin Unlimited devevelopement team. Remember that service bits are just
     // unauthenticated advertisements, so your code must be robust against
     // collisions and other cases where nodes may be advertising a service they
     // do not actually support. Other service bits should be allocated via the
-    // BIP process.
+    // BUIP process.
+
+    NODE_WEAKBLOCKS = (1 << 7)
 };
 
 /** A CService with information about it as peer */
@@ -394,6 +415,10 @@ enum
     // BUIP010 Xtreme Thinblocks: an Xtreme thin block contains the first 8 bytes of all the tx hashes
     // and also provides the missing transactions that are needed at the other end to reconstruct the block
     MSG_XTHINBLOCK,
+    // BUIPXXX Graphene blocks: similar to xtreme thin blocks, a graphene block contains all the transactions
+    // hashes in a block and also provides the missing transaction ids that are needed at the other end to
+    // reconstruct the block
+    MSG_GRAPHENEBLOCK,
 };
 
 #endif // BITCOIN_PROTOCOL_H

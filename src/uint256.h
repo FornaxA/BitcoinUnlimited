@@ -1,6 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -139,4 +139,17 @@ inline uint256 uint256S(const std::string &str)
     return rv;
 }
 
+inline uint160 uint160S(const char *str)
+{
+    uint160 rv;
+    rv.SetHex(str);
+    return rv;
+}
+
+inline uint160 uint160S(const std::string &str)
+{
+    uint160 rv;
+    rv.SetHex(str);
+    return rv;
+}
 #endif // BITCOIN_UINT256_H

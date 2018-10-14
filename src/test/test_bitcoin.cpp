@@ -1,5 +1,5 @@
 // Copyright (c) 2011-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -31,7 +31,7 @@
 
 #include <boost/thread.hpp>
 
-CClientUIInterface uiInterface; // Declared but not defined in ui_interface.h
+FastRandomContext insecure_rand_ctx(true);
 
 extern bool fPrintToConsole;
 extern void noui_connect();
@@ -56,9 +56,9 @@ TestingSetup::TestingSetup(const std::string &chainName) : BasicTestingSetup(cha
     // instead of unit tests, but for now we need these here.
     RegisterAllCoreRPCCommands(tableRPC);
     ClearDatadirCache();
-    pathTemp = GetTempPath() / strprintf("test_bitcoin_%lu_%i", (unsigned long)GetTime(), (int)(GetRand(100000)));
+    pathTemp = GetTempPath() / strprintf("test_bitcoin_%lu_%i", (unsigned long)GetTime(), (int)(GetRand(1 << 30)));
     fs::create_directories(pathTemp);
-    pblocktree = new CBlockTreeDB(1 << 20, true);
+    pblocktree = new CBlockTreeDB(1 << 20, "", true);
     pcoinsdbview = new CCoinsViewDB(1 << 23, true);
     pcoinsTip = new CCoinsViewCache(pcoinsdbview);
     bool worked = InitBlockIndex(chainparams);
@@ -89,7 +89,7 @@ TestChain100Setup::TestChain100Setup() : TestingSetup(CBaseChainParams::REGTEST)
     {
         std::vector<CMutableTransaction> noTxns;
         CBlock b = CreateAndProcessBlock(noTxns, scriptPubKey);
-        coinbaseTxns.push_back(b.vtx[0]);
+        coinbaseTxns.push_back(*b.vtx[0]);
     }
 }
 
@@ -101,13 +101,15 @@ CBlock TestChain100Setup::CreateAndProcessBlock(const std::vector<CMutableTransa
     const CScript &scriptPubKey)
 {
     const CChainParams &chainparams = Params();
-    CBlockTemplate *pblocktemplate = BlockAssembler(chainparams).CreateNewBlock(scriptPubKey);
+    std::unique_ptr<CBlockTemplate> pblocktemplate(new CBlockTemplate());
+    pblocktemplate = BlockAssembler(chainparams).CreateNewBlock(scriptPubKey);
     CBlock &block = pblocktemplate->block;
 
     // Replace mempool-selected txns with just coinbase plus passed-in txns:
     block.vtx.resize(1);
-    BOOST_FOREACH (const CMutableTransaction &tx, txns)
-        block.vtx.push_back(tx);
+    for (const CMutableTransaction &tx : txns)
+        block.vtx.push_back(MakeTransactionRef(tx));
+
     // IncrementExtraNonce creates a valid coinbase and merkleRoot
     unsigned int extraNonce = 0;
     IncrementExtraNonce(&block, extraNonce);
@@ -119,20 +121,26 @@ CBlock TestChain100Setup::CreateAndProcessBlock(const std::vector<CMutableTransa
     ProcessNewBlock(state, chainparams, NULL, &block, true, NULL, false);
 
     CBlock result = block;
-    delete pblocktemplate;
     return result;
 }
 
 TestChain100Setup::~TestChain100Setup() {}
-CTxMemPoolEntry TestMemPoolEntryHelper::FromTx(CMutableTransaction &tx, CTxMemPool *pool)
+CTxMemPoolEntry TestMemPoolEntryHelper::FromTx(const CMutableTransaction &tx, CTxMemPool *pool)
 {
     CTransaction txn(tx);
-    bool hasNoDependencies = pool ? pool->HasNoInputsOf(tx) : hadNoDependencies;
+    return FromTx(txn, pool);
+}
+
+CTxMemPoolEntry TestMemPoolEntryHelper::FromTx(const CTransaction &txn, CTxMemPool *pool)
+{
+    bool hasNoDependencies = pool ? pool->HasNoInputsOf(txn) : hadNoDependencies;
     // Hack to assume either its completely dependent on other mempool txs or not at all
     CAmount inChainValue = hasNoDependencies ? txn.GetValueOut() : 0;
 
-    return CTxMemPoolEntry(
-        txn, nFee, nTime, dPriority, nHeight, hasNoDependencies, inChainValue, spendsCoinbase, sigOpCount, lp);
+    CTxMemPoolEntry ret(MakeTransactionRef(txn), nFee, nTime, dPriority, nHeight, hasNoDependencies, inChainValue,
+        spendsCoinbase, sigOpCount, lp);
+    ret.sighashType = SIGHASH_ALL; // For testing, give the transaction any valid sighashtype
+    return ret;
 }
 
 void Shutdown(void *parg) { exit(0); }
@@ -164,6 +172,10 @@ struct StartupShutdown
             std::string s = opts["log_bitcoin"].as<std::string>();
             if (s == "console")
             {
+                /* To enable this, add
+                   -- --log_bitcoin console
+                   to the end of the test_bitcoin argument list. */
+                Logging::LogToggleCategory(Logging::ALL, true);
                 fPrintToConsole = true;
                 fPrintToDebugLog = false;
             }
@@ -178,3 +190,9 @@ struct StartupShutdown
 };
 
 BOOST_GLOBAL_FIXTURE(StartupShutdown);
+
+std::ostream &operator<<(std::ostream &os, const uint256 &num)
+{
+    os << num.ToString();
+    return os;
+}

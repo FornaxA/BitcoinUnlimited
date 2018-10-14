@@ -1,6 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -8,8 +8,6 @@
 #include "bandb.h"
 #include "connmgr.h"
 #include "ui_interface.h"
-
-#include <boost/foreach.hpp>
 
 CDoSManager::CDoSManager() : setBannedIsDirty(false), nBanThreshold(DEFAULT_BANSCORE_THRESHOLD) {}
 /**
@@ -25,7 +23,7 @@ void CDoSManager::HandleCommandLine() { nBanThreshold = GetArg("-banscore", DEFA
 bool CDoSManager::IsWhitelistedRange(const CNetAddr &addr)
 {
     LOCK(cs_vWhitelistedRange);
-    BOOST_FOREACH (const CSubNet &subnet, vWhitelistedRange)
+    for (const CSubNet &subnet : vWhitelistedRange)
     {
         if (subnet.Match(addr))
             return true;
@@ -238,7 +236,7 @@ void CDoSManager::SweepBannedInternal() EXCLUSIVE_LOCKS_REQUIRED(cs_setBanned)
         {
             setBanned.erase(it++);
             setBannedIsDirty = true;
-            LogPrint("net", "%s: Removed banned node ip/subnet from banlist.dat: %s\n", __func__, subNet.ToString());
+            LOG(NET, "%s: Removed banned node ip/subnet from banlist.dat: %s\n", __func__, subNet.ToString());
         }
         else
             ++it;
@@ -269,11 +267,11 @@ void CDoSManager::Misbehaving(CNode *pNode, int howmuch)
 
     if (prior + howmuch >= nBanThreshold && prior < nBanThreshold)
     {
-        LogPrintf("%s: %s (%d -> %d) BAN THRESHOLD EXCEEDED\n", __func__, pNode->GetLogName(), prior, prior + howmuch);
+        LOGA("%s: %s (%d -> %d) BAN THRESHOLD EXCEEDED\n", __func__, pNode->GetLogName(), prior, prior + howmuch);
         pNode->fShouldBan = true;
     }
     else
-        LogPrintf("%s: %s (%d -> %d)\n", __func__, pNode->GetLogName(), prior, prior + howmuch);
+        LOGA("%s: %s (%d -> %d)\n", __func__, pNode->GetLogName(), prior, prior + howmuch);
 }
 
 /**
@@ -320,8 +318,7 @@ void CDoSManager::DumpBanlist()
         setBannedIsDirty = true;
     }
     else
-        LogPrint("net", "Flushed %d banned node ips/subnets to banlist.dat  %dms\n", banmap.size(),
-            GetTimeMillis() - nStart);
+        LOG(NET, "Flushed %d banned node ips/subnets to banlist.dat  %dms\n", banmap.size(), GetTimeMillis() - nStart);
 }
 
 /**
@@ -344,9 +341,8 @@ void CDoSManager::LoadBanlist()
         // Remove any ban entries that were persisted to disk but have since expired
         SweepBannedInternal();
 
-        LogPrint("net", "Loaded %d banned node ips/subnets from banlist.dat  %dms\n", banmap.size(),
-            GetTimeMillis() - nStart);
+        LOG(NET, "Loaded %d banned node ips/subnets from banlist.dat  %dms\n", banmap.size(), GetTimeMillis() - nStart);
     }
     else
-        LogPrintf("Invalid or missing banlist.dat; recreating\n");
+        LOGA("Invalid or missing banlist.dat; recreating\n");
 }

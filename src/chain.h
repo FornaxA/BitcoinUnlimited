@@ -1,6 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -80,7 +80,7 @@ struct CDiskBlockPos
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream &s, Operation ser_action)
     {
-        READWRITE(VARINT(nFile));
+        READWRITE(VARINT(nFile, VarIntMode::NONNEGATIVE_SIGNED));
         READWRITE(VARINT(nPos));
     }
 
@@ -200,6 +200,7 @@ public:
     //! (memory only) Sequential id assigned to distinguish order in which blocks are received.
     uint32_t nSequenceId;
 
+
     void SetNull()
     {
         phashBlock = NULL;
@@ -269,17 +270,23 @@ public:
         return block;
     }
 
-    // was the fork activated on this or any prior block?
-    bool forkActivated(int time);
+    /** return true for every block from fork block and forward [x,+inf)
+     * state: fork activated */
+    bool forkActivated(int time) const;
 
-    // Is THIS the fork block?
-    bool forkActivateNow(int time);
+    /** return true only if we are exactly on the fork block [x,x]
+     * state: fork activated */
+    bool forkActivateNow(int time) const;
 
-    // Is the next block the fork block?
-    bool forkAtNextBlock(int time);
+    /** This will check if the Fork will be enabled at the next block
+     * i.e. we are at block x - 1, [x-1, +inf]
+     * state fork: enabled or activated */
+    bool IsforkActiveOnNextBlock(int time) const;
 
-    // Is the fork active on the next block?
-    bool IsforkActiveOnNextBlock(int time);
+    /** return true only if 1st condition is true (Median past time > UAHF time)
+     * and not the 2nd, i.e. we are at precisely [x-1,x-1]
+     * state: fork enabled but not activateda */
+    bool forkAtNextBlock(int time) const;
 
     uint256 GetBlockHash() const { return *phashBlock; }
     int64_t GetBlockTime() const { return (int64_t)nTime; }
@@ -364,20 +371,21 @@ public:
         hashPrev = (pprev ? pprev->GetBlockHash() : uint256());
     }
 
+    friend bool operator<(const CDiskBlockIndex &a, const CDiskBlockIndex &b) { return a.nHeight < b.nHeight; }
     ADD_SERIALIZE_METHODS;
 
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream &s, Operation ser_action)
     {
-        int nVersion = s.GetVersion();
+        int _nVersion = s.GetVersion();
         if (!(s.GetType() & SER_GETHASH))
-            READWRITE(VARINT(nVersion));
+            READWRITE(VARINT(_nVersion, VarIntMode::NONNEGATIVE_SIGNED));
 
-        READWRITE(VARINT(nHeight));
+        READWRITE(VARINT(nHeight, VarIntMode::NONNEGATIVE_SIGNED));
         READWRITE(VARINT(nStatus));
         READWRITE(VARINT(nTx));
         if (nStatus & (BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO))
-            READWRITE(VARINT(nFile));
+            READWRITE(VARINT(nFile, VarIntMode::NONNEGATIVE_SIGNED));
         if (nStatus & BLOCK_HAVE_DATA)
             READWRITE(VARINT(nDataPos));
         if (nStatus & BLOCK_HAVE_UNDO)
@@ -454,7 +462,7 @@ public:
         if (Contains(pindex))
             return (*this)[pindex->nHeight + 1];
         else
-            return NULL;
+            return nullptr;
     }
 
     /** Return the maximal height in the chain. Is equal to chain.Tip() ? chain.Tip()->nHeight : -1. */

@@ -15,7 +15,6 @@
 #include <stdio.h>
 
 #include <boost/algorithm/string.hpp> // boost::trim
-#include <boost/foreach.hpp> //BOOST_FOREACH
 
 /** WWW-Authenticate to present with 401 Unauthorized response */
 static const char *WWW_AUTH_HEADER_DATA = "Basic realm=\"jsonrpc\"";
@@ -42,7 +41,7 @@ private:
 class HTTPRPCTimerInterface : public RPCTimerInterface
 {
 public:
-    HTTPRPCTimerInterface(struct event_base *base) : base(base) {}
+    HTTPRPCTimerInterface(struct event_base *_base) : base(_base) {}
     const char *Name() { return "HTTP"; }
     RPCTimerBase *NewTimer(boost::function<void(void)> &func, int64_t millis)
     {
@@ -90,7 +89,7 @@ static bool multiUserAuthorized(std::string strUserPass)
     if (mapMultiArgs.count("-rpcauth") > 0)
     {
         // Search for multi-user login/pass "rpcauth" from config
-        BOOST_FOREACH (std::string strRPCAuth, mapMultiArgs["-rpcauth"])
+        for (std::string &strRPCAuth : mapMultiArgs["-rpcauth"])
         {
             std::vector<std::string> vFields;
             boost::split(vFields, strRPCAuth, boost::is_any_of(":$"));
@@ -167,7 +166,7 @@ static bool HTTPReq_JSONRPC(HTTPRequest *req, const std::string &)
 
     if (!RPCAuthorized(authHeader.second))
     {
-        LogPrintf("ThreadRPCServer incorrect password attempt from %s\n", req->GetPeer().ToString());
+        LOGA("ThreadRPCServer incorrect password attempt from %s\n", req->GetPeer().ToString());
 
         /* Deter brute-forcing
            If this results in a DoS the user really
@@ -225,7 +224,7 @@ static bool InitRPCAuthentication()
 {
     if (mapArgs["-rpcpassword"] == "")
     {
-        LogPrintf("No rpcpassword set - using random cookie authentication\n");
+        LOGA("No rpcpassword set - using random cookie authentication\n");
         if (!GenerateAuthCookie(&strRPCUserColonPass))
         {
             uiInterface.ThreadSafeMessageBox(
@@ -236,9 +235,9 @@ static bool InitRPCAuthentication()
     }
     else
     {
-        LogPrintf("Config options rpcuser and rpcpassword will soon be deprecated. Locally-run instances may remove "
-                  "rpcuser to use cookie-based auth, or may be replaced with rpcauth. Please see share/rpcuser for "
-                  "rpcauth auth generation.\n");
+        LOGA("Config options rpcuser and rpcpassword will soon be deprecated. Locally-run instances may remove "
+             "rpcuser to use cookie-based auth, or may be replaced with rpcauth. Please see share/rpcuser for "
+             "rpcauth auth generation.\n");
         strRPCUserColonPass = mapArgs["-rpcuser"] + ":" + mapArgs["-rpcpassword"];
     }
     return true;
@@ -246,7 +245,7 @@ static bool InitRPCAuthentication()
 
 bool StartHTTPRPC()
 {
-    LogPrint("rpc", "Starting HTTP RPC server\n");
+    LOG(RPC, "Starting HTTP RPC server\n");
     if (!InitRPCAuthentication())
         return false;
 
@@ -258,10 +257,10 @@ bool StartHTTPRPC()
     return true;
 }
 
-void InterruptHTTPRPC() { LogPrint("rpc", "Interrupting HTTP RPC server\n"); }
+void InterruptHTTPRPC() { LOG(RPC, "Interrupting HTTP RPC server\n"); }
 void StopHTTPRPC()
 {
-    LogPrint("rpc", "Stopping HTTP RPC server\n");
+    LOG(RPC, "Stopping HTTP RPC server\n");
     UnregisterHTTPHandler("/", true);
     if (httpRPCTimerInterface)
     {

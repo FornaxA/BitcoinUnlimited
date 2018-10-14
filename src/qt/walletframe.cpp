@@ -1,5 +1,5 @@
 // Copyright (c) 2011-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -13,8 +13,8 @@
 #include <QHBoxLayout>
 #include <QLabel>
 
-WalletFrame::WalletFrame(const PlatformStyle *platformStyle, BitcoinGUI *_gui)
-    : QFrame(_gui), gui(_gui), platformStyle(platformStyle)
+WalletFrame::WalletFrame(const PlatformStyle *_platformStyle, const Config *_cfg, BitcoinGUI *_gui)
+    : QFrame(_gui), gui(_gui), platformStyle(_platformStyle), cfg(_cfg)
 {
     // Leave HBox hook for adding a list view later
     QHBoxLayout *walletFrameLayout = new QHBoxLayout(this);
@@ -29,13 +29,13 @@ WalletFrame::WalletFrame(const PlatformStyle *platformStyle, BitcoinGUI *_gui)
 }
 
 WalletFrame::~WalletFrame() {}
-void WalletFrame::setClientModel(ClientModel *clientModel) { this->clientModel = clientModel; }
+void WalletFrame::setClientModel(ClientModel *_clientModel) { this->clientModel = _clientModel; }
 bool WalletFrame::addWallet(const QString &name, WalletModel *walletModel)
 {
     if (!gui || !clientModel || !walletModel || mapWalletViews.count(name) > 0)
         return false;
 
-    WalletView *walletView = new WalletView(platformStyle, this);
+    WalletView *walletView = new WalletView(platformStyle, cfg, this);
     walletView->setBitcoinGUI(gui);
     walletView->setClientModel(clientModel);
     walletView->setWalletModel(walletModel);

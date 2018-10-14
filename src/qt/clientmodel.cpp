@@ -1,5 +1,5 @@
 // Copyright (c) 2011-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -14,6 +14,7 @@
 #include "clientversion.h"
 #include "net.h"
 #include "txmempool.h"
+#include "txorphanpool.h"
 #include "ui_interface.h"
 #include "util.h"
 
@@ -27,8 +28,8 @@ class CBlockIndex;
 static const int64_t nClientStartupTime = GetTime();
 static int64_t nLastBlockTipUpdateNotification = 0;
 
-ClientModel::ClientModel(OptionsModel *optionsModel, UnlimitedModel *ul, QObject *parent)
-    : QObject(parent), unlimitedModel(ul), optionsModel(optionsModel), peerTableModel(0), banTableModel(0),
+ClientModel::ClientModel(OptionsModel *_optionsModel, UnlimitedModel *ul, QObject *parent)
+    : QObject(parent), unlimitedModel(ul), optionsModel(_optionsModel), peerTableModel(0), banTableModel(0),
       pollTimer1(0), pollTimer2(0)
 {
     peerTableModel = new PeerTableModel(this);
@@ -53,7 +54,7 @@ int ClientModel::getNumConnections(unsigned int flags) const
         return vNodes.size();
 
     int nNum = 0;
-    BOOST_FOREACH (const CNode *pnode, vNodes)
+    for (const CNode *pnode : vNodes)
         if (flags & (pnode->fInbound ? CONNECTIONS_IN : CONNECTIONS_OUT))
             nNum++;
 
@@ -79,12 +80,7 @@ QDateTime ClientModel::getLastBlockDate() const
 }
 
 long ClientModel::getMempoolSize() const { return mempool.size(); }
-long ClientModel::getOrphanPoolSize() const
-{
-    LOCK(cs_orphancache);
-    return mapOrphanTransactions.size();
-}
-
+long ClientModel::getOrphanPoolSize() const { return orphanpool.GetOrphanPoolSize(); }
 size_t ClientModel::getMempoolDynamicUsage() const { return mempool.DynamicMemoryUsage(); }
 // BU: begin
 double ClientModel::getTransactionsPerSecond() const { return mempool.TransactionsPerSecond(); }
@@ -116,6 +112,12 @@ void ClientModel::updateTimer2()
     Q_EMIT orphanPoolSizeChanged(getOrphanPoolSize());
     Q_EMIT bytesChanged(getTotalBytesRecv(), getTotalBytesSent());
 
+    thindata.FillThinBlockQuickStats(thinStats);
+    Q_EMIT thinBlockPropagationStatsChanged(thinStats);
+
+    graphenedata.FillGrapheneQuickStats(grapheneStats);
+    Q_EMIT grapheneBlockPropagationStatsChanged(grapheneStats);
+
     uiInterface.BannedListChanged();
 }
 
@@ -144,7 +146,7 @@ bool ClientModel::isReleaseVersion() const { return CLIENT_VERSION_IS_RELEASE; }
 QString ClientModel::clientName() const { return QString::fromStdString(CLIENT_NAME); }
 QString ClientModel::formatClientStartupTime() const
 {
-    QString time_format = "MMM  d yyyy, HH:mm:ss";
+    QString time_format = "MMM d yyyy, HH:mm:ss";
     return QDateTime::fromTime_t(nClientStartupTime).toString(time_format);
 }
 

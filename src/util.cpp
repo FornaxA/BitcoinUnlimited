@@ -1,12 +1,14 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2015 The Bitcoin Core developers
-// Copyright (c) 2015-2017 The Bitcoin Unlimited developers
+// Copyright (c) 2015-2018 The Bitcoin Unlimited developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #if defined(HAVE_CONFIG_H)
 #include "config/bitcoin-config.h"
 #endif
+
+#include "compat.h"
 
 #include "util.h"
 
@@ -40,6 +42,7 @@
 
 #include <algorithm>
 #include <fcntl.h>
+#include <sched.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 
@@ -81,13 +84,33 @@
 #include <boost/algorithm/string/case_conv.hpp> // for to_lower()
 #include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/predicate.hpp> // for startswith() and endswith()
-#include <boost/foreach.hpp>
 #include <boost/program_options/detail/config_file.hpp>
 #include <boost/program_options/parsers.hpp>
 #include <boost/thread.hpp>
 #include <openssl/conf.h>
 #include <openssl/crypto.h>
 #include <openssl/rand.h>
+#include <thread>
+
+std::vector<std::string> splitByCommasAndRemoveSpaces(const std::vector<std::string> &args)
+{
+    std::vector<std::string> result;
+    for (std::string arg : args)
+    {
+        size_t pos;
+        while ((pos = arg.find(',')) != std::string::npos)
+        {
+            result.push_back(arg.substr(0, pos));
+            arg = arg.substr(pos + 1);
+        }
+        std::string arg_nospace;
+        for (char c : arg)
+            if (c != ' ')
+                arg_nospace += c;
+        result.push_back(arg_nospace);
+    }
+    return result;
+}
 
 // Work around clang compilation problem in Boost 1.46:
 // /usr/include/boost/program_options/detail/config_file.hpp:163:17: error: call to function 'to_internal' that is
@@ -105,8 +128,82 @@ std::string to_internal(const std::string &);
 
 using namespace std;
 
+namespace Logging
+{
+// Globals defined here because link fails if in globals.cpp.
+// Keep at top of file so init first:
+uint64_t categoriesEnabled = 0; // 64 bit log id mask.
+static map<uint64_t, std::string> logLabelMap = LOGLABELMAP; // Lookup log label from log id.
+
+
+uint64_t LogFindCategory(const std::string label)
+{
+    for (auto &x : logLabelMap)
+    {
+        if ((std::string)x.second == label)
+            return (uint64_t)x.first;
+    }
+    return NONE;
+}
+
+std::string LogGetLabel(uint64_t category)
+{
+    string label = "none";
+    if (logLabelMap.count(category) != 0)
+        label = logLabelMap[category];
+
+    return label;
+}
+
+std::string LogGetAllString()
+{
+    string ret = "";
+    for (auto &x : logLabelMap)
+    {
+        if (x.first == ALL || x.first == NONE)
+            continue;
+
+        // ret += (std::string)x.second;
+        if (LogAcceptCategory(x.first))
+            ret += "on ";
+        else
+            ret += "   ";
+
+        ret += (std::string)x.second;
+        ret += "\n";
+    }
+
+    return ret;
+}
+
+void LogInit()
+{
+    string category = "";
+    uint64_t catg = Logging::NONE;
+    const vector<string> categories = splitByCommasAndRemoveSpaces(mapMultiArgs["-debug"]);
+
+    // enable all when given -debug=1 or -debug
+    if (categories.size() == 1 && (categories[0] == "" || categories[0] == "1"))
+    {
+        Logging::LogToggleCategory(Logging::ALL, true);
+        return;
+    }
+    for (string const &cat : categories)
+    {
+        category = boost::algorithm::to_lower_copy(cat);
+        catg = LogFindCategory(category);
+
+        if (catg == NONE) // Not a valid category
+            continue;
+
+        LogToggleCategory(catg, true);
+    }
+}
+}
+
 const char *const BITCOIN_CONF_FILENAME = "bitcoin.conf";
 const char *const BITCOIN_PID_FILENAME = "bitcoind.pid";
+const char *const FORKS_CSV_FILENAME = "forks.csv"; // bip135 added
 
 map<string, string> mapArgs;
 map<string, vector<string> > mapMultiArgs;
@@ -176,7 +273,7 @@ public:
 } instance_of_cinit;
 
 /**
- * LogPrintf() has been broken a couple of times now
+ * LOGA() has been broken a couple of times now
  * by well-meaning people adding mutexes in the most straightforward way.
  * It breaks because it may be called by global destructors during shutdown.
  * Since the order of destruction of static/global objects is undefined,
@@ -233,34 +330,6 @@ void OpenDebugLog()
     vMsgsBeforeOpenLog = NULL;
 }
 
-bool LogAcceptCategory(const char *category)
-{
-    if (category != NULL)
-    {
-        if (!fDebug)
-            return false;
-
-        // Give each thread quick access to -debug settings.
-        // This helps prevent issues debugging global destructors,
-        // where mapMultiArgs might be deleted before another
-        // global destructor calls LogPrint()
-        static boost::thread_specific_ptr<set<string> > ptrCategory;
-        if (ptrCategory.get() == NULL)
-        {
-            const vector<string> &categories = mapMultiArgs["-debug"];
-            ptrCategory.reset(new set<string>(categories.begin(), categories.end()));
-            // thread_specific_ptr automatically deletes the set when the thread ends.
-        }
-        const set<string> &setCategories = *ptrCategory.get();
-
-        // if not debugging everything and not debugging specific category, LogPrint does nothing.
-        if (setCategories.count(string("")) == 0 && setCategories.count(string("1")) == 0 &&
-            setCategories.count(string(category)) == 0)
-            return false;
-    }
-    return true;
-}
-
 /**
  * fStartedNewLine is a state variable held by the calling context that will
  * suppress printing of the timestamp when multiple calls are made that don't
@@ -290,6 +359,21 @@ static std::string LogTimestampStr(const std::string &str, bool *fStartedNewLine
         *fStartedNewLine = false;
 
     return strStamped;
+}
+
+static void MonitorLogfile()
+{
+    // Check if debug.log has been deleted or moved.
+    // If so re-open
+    static int existcounter = 1;
+    existcounter++;
+    if (existcounter % 63 == 0) // Check every 64 log msgs
+    {
+        fs::path fileName = GetDataDir() / "debug.log";
+        bool exists = boost::filesystem::exists(fileName);
+        if (!exists)
+            fReopenDebugLog = true;
+    }
 }
 
 int LogPrintStr(const std::string &str)
@@ -329,6 +413,7 @@ int LogPrintStr(const std::string &str)
             }
 
             ret = FileWriteStr(strTimestamped, fileout);
+            MonitorLogfile();
         }
     }
     return ret;
@@ -455,7 +540,7 @@ static std::string FormatException(const std::exception *pex, const char *pszThr
 void PrintExceptionContinue(const std::exception *pex, const char *pszThread)
 {
     std::string message = FormatException(pex, pszThread);
-    LogPrintf("\n\n************************\n%s\n", message);
+    LOGA("\n\n************************\n%s\n", message);
     fprintf(stderr, "\n\n************************\n%s\n", message.c_str());
 }
 
@@ -495,7 +580,7 @@ const fs::path &GetDataDir(bool fNetSpecific)
 
     fs::path &path = fNetSpecific ? pathCachedNetSpecific : pathCached;
 
-    // This can be called during exceptions by LogPrintf(), so we cache the
+    // This can be called during exceptions by LOGA(), so we cache the
     // value so we don't have to do memory allocations after that.
     if (!path.empty())
         return path;
@@ -522,7 +607,7 @@ const fs::path &GetDataDir(bool fNetSpecific)
     }
     catch (const fs::filesystem_error &e)
     {
-        LogPrintf("failed to create directories to (%s): %s\n", path, e.what());
+        LOGA("failed to create directories to (%s): %s\n", path, e.what());
     }
 
     return path;
@@ -543,6 +628,19 @@ fs::path GetConfigFile(const std::string &confPath)
         pathConfigFile = GetDataDir(false) / pathConfigFile;
 
     return pathConfigFile;
+}
+
+// bip135 added
+/**
+ * Function to return expected path of FORKS_CSV_FILENAME
+ */
+fs::path GetForksCsvFile()
+{
+    fs::path pathCsvFile(GetArg("-forks", FORKS_CSV_FILENAME));
+    if (!pathCsvFile.is_complete())
+        pathCsvFile = GetDataDir(false) / pathCsvFile;
+
+    return pathCsvFile;
 }
 
 void ReadConfigFile(map<string, string> &mapSettingsRet,
@@ -622,19 +720,19 @@ bool TryCreateDirectories(const fs::path &p)
     return false;
 }
 
-void FileCommit(FILE *fileout)
+void FileCommit(FILE *pFileout)
 {
-    fflush(fileout); // harmless if redundantly called
+    fflush(pFileout); // harmless if redundantly called
 #ifdef WIN32
-    HANDLE hFile = (HANDLE)_get_osfhandle(_fileno(fileout));
+    HANDLE hFile = (HANDLE)_get_osfhandle(_fileno(pFileout));
     FlushFileBuffers(hFile);
 #else
 #if defined(__linux__) || defined(__NetBSD__)
-    fdatasync(fileno(fileout));
+    fdatasync(fileno(pFileout));
 #elif defined(__APPLE__) && defined(F_FULLFSYNC)
-    fcntl(fileno(fileout), F_FULLFSYNC, 0);
+    fcntl(fileno(pFileout), F_FULLFSYNC, 0);
 #else
-    fsync(fileno(fileout));
+    fsync(fileno(pFileout));
 #endif
 #endif
 }
@@ -655,7 +753,7 @@ bool TruncateFile(FILE *file, unsigned int length)
 int RaiseFileDescriptorLimit(int nMinFD)
 {
 #if defined(WIN32)
-    return 2048;
+    return FD_SETSIZE;
 #else
     struct rlimit limitFD;
     if (getrlimit(RLIMIT_NOFILE, &limitFD) != -1)
@@ -759,7 +857,7 @@ fs::path GetSpecialFolderPath(int nFolder, bool fCreate)
         return fs::path(pszPath);
     }
 
-    LogPrintf("SHGetSpecialFolderPathA() failed, could not obtain requested path.\n");
+    LOGA("SHGetSpecialFolderPathA() failed, could not obtain requested path.\n");
     return fs::path("");
 }
 #endif
@@ -768,7 +866,7 @@ void runCommand(const std::string &strCommand)
 {
     int nErr = ::system(strCommand.c_str());
     if (nErr)
-        LogPrintf("runCommand error: system(%s) returned %d\n", strCommand, nErr);
+        LOGA("runCommand error: system(%s) returned %d\n", strCommand, nErr);
 }
 
 void RenameThread(const char *name)
@@ -834,15 +932,7 @@ void SetThreadPriority(int nPriority)
 #endif // WIN32
 }
 
-int GetNumCores()
-{
-#if BOOST_VERSION >= 105600
-    return boost::thread::physical_concurrency();
-#else // Must fall back to hardware_concurrency, which unfortunately counts virtual cores
-    return boost::thread::hardware_concurrency();
-#endif
-}
-
+int GetNumCores() { return std::thread::hardware_concurrency(); }
 std::string CopyrightHolders(const std::string &strPrefix)
 {
     std::string strCopyrightHolders = strPrefix + _(COPYRIGHT_HOLDERS);
@@ -851,4 +941,110 @@ std::string CopyrightHolders(const std::string &strPrefix)
         strCopyrightHolders = strprintf(strCopyrightHolders, _(COPYRIGHT_HOLDERS_SUBSTITUTION));
     }
     return strCopyrightHolders;
+}
+
+bool IsStringTrue(const std::string &str)
+{
+    const std::set<std::string> strOn = {"enable", "1", "true", "on"};
+    const std::set<std::string> strOff = {"disable", "0", "false", "off"};
+    const std::string lowstr = boost::algorithm::to_lower_copy(str);
+
+    if (strOn.count(lowstr))
+        return true;
+
+    if (strOff.count(lowstr))
+        return false;
+
+    // If not found:
+    throw std::string("IsStringTrue() was passed an Invalid string");
+
+    return false;
+}
+
+static const int wildmatch_max_length = 1024;
+
+bool wildmatch(string pattern, string test)
+{
+    // stack overflow prevention
+    if (test.size() > wildmatch_max_length || pattern.size() > wildmatch_max_length)
+    {
+        return false;
+    }
+
+    while (true)
+    {
+        // handle empty strings
+        if (!test.size() && !pattern.size())
+            return true;
+
+        // handle trailing chars in test str
+        if (test.size() && !pattern.size())
+            return false;
+
+        // handle trailing chars in  pattern str. Needs to be a single asterisk to match.
+        if (!test.size() && pattern.size())
+        {
+            return pattern == "*";
+        }
+
+        // test.size() && pattern.size() holds when reaching here
+
+        if (pattern[0] == '?')
+        {
+            pattern = pattern.substr(1);
+            test = test.substr(1);
+            continue;
+        }
+
+        if (pattern[0] == '*')
+        {
+            if (pattern.size() > 1)
+            {
+                // Will not try multiple ways to match to avoid the potential
+                // for path explosion, like matching "*-*-*-*" to "------------" and the like
+                // Just eat up the test string until the first char mismatches
+                if (pattern[1] == '?' || pattern[1] == '*')
+                {
+                    // ** or *? patterns are disallowed in the midst of a matching expression
+                    return false;
+                }
+                size_t i = 0;
+                while (i < test.size())
+                {
+                    if (test[i] != pattern[1])
+                        i++;
+                    else
+                        break;
+                }
+                if (i == test.size())
+                    return true;
+
+                pattern = pattern.substr(1);
+                test = test.substr(i);
+                continue;
+            }
+            else
+                return true;
+        }
+        if (test[0] != pattern[0])
+            return false;
+
+        pattern = pattern.substr(1);
+        test = test.substr(1);
+    }
+}
+
+int ScheduleBatchPriority(void)
+{
+#ifdef SCHED_BATCH
+    const static sched_param param{0};
+    if (int ret = pthread_setschedparam(pthread_self(), SCHED_BATCH, &param))
+    {
+        LOGA("Failed to pthread_setschedparam: %s\n", strerror(errno));
+        return ret;
+    }
+    return 0;
+#else
+    return 1;
+#endif
 }
