@@ -127,6 +127,7 @@ BITCOIN_CORE_H = \
   config.h \
   connmgr.h \
   consensus/consensus.h \
+  consensus/tokengroups.h \
   consensus/tx_verify.h \
   core_io.h \
   core_memusage.h \
@@ -212,6 +213,7 @@ BITCOIN_CORE_H = \
   wallet/rpcwallet.h \
   wallet/wallet.h \
   wallet/walletdb.h \
+  wallet/tokengroupwallet.h \
   zmq/zmqabstractnotifier.h \
   zmq/zmqconfig.h\
   zmq/zmqnotificationinterface.h \
@@ -249,6 +251,7 @@ libbitcoin_server_a_SOURCES = \
   chain.cpp \
   checkpoints.cpp \
   connmgr.cpp \
+  consensus/tokengroups.cpp \
   consensus/tx_verify.cpp \
   dosman.cpp \
   expedited.cpp \
@@ -316,6 +319,7 @@ libbitcoin_wallet_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 libbitcoin_wallet_a_SOURCES = \
   wallet/crypter.cpp \
   wallet/db.cpp \
+  wallet/tokengroupwallet.cpp \
   wallet/rpcdump.cpp \
   wallet/rpcwallet.cpp \
   wallet/wallet.cpp \
@@ -599,7 +603,7 @@ if GLIBC_BACK_COMPAT
 endif
 
 libbitcoinconsensus_la_LDFLAGS = $(AM_LDFLAGS) $(BOOST_LIBS) -no-undefined $(RELDFLAGS)
-libbitcoinconsensus_la_LIBADD = $(LIBSECP256K1)
+libbitcoinconsensus_la_LIBADD =  $(LIBSECP256K1)
 libbitcoinconsensus_la_CPPFLAGS = $(AM_CPPFLAGS) -I$(BOOST_CPPFLAGS) -I$(builddir)/obj -I$(srcdir)/secp256k1/include -DBUILD_BITCOIN_INTERNAL
 libbitcoinconsensus_la_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 
