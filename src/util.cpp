@@ -20,6 +20,8 @@
 #include "utilstrencodings.h"
 #include "utiltime.h"
 
+#include <condition_variable>
+#include <mutex>
 #include <sstream>
 #include <stdarg.h>
 
@@ -92,7 +94,8 @@
 #include <openssl/rand.h>
 #include <thread>
 
-std::vector<std::string> splitByCommasAndRemoveSpaces(const std::vector<std::string> &args)
+std::vector<std::string> splitByCommasAndRemoveSpaces(const std::vector<std::string> &args,
+    bool removeDuplicates /* false */)
 {
     std::vector<std::string> result;
     for (std::string arg : args)
@@ -109,6 +112,14 @@ std::vector<std::string> splitByCommasAndRemoveSpaces(const std::vector<std::str
                 arg_nospace += c;
         result.push_back(arg_nospace);
     }
+
+    // remove duplicates from the list of debug categories
+    if (removeDuplicates)
+    {
+        std::sort(result.begin(), result.end());
+        result.erase(std::unique(result.begin(), result.end()), result.end());
+    }
+    std::reverse(result.begin(), result.end());
     return result;
 }
 
@@ -154,50 +165,77 @@ std::string LogGetLabel(uint64_t category)
 
     return label;
 }
-
-std::string LogGetAllString()
+// Return a string rapresentation of all debug categories and their current status,
+// one category per line. If enabled is true it returns only the list of enabled
+// debug categories concatenated in a single line.
+std::string LogGetAllString(bool fEnabled)
 {
-    string ret = "";
+    string allCategories = "";
+    string enabledCategories = "";
     for (auto &x : logLabelMap)
     {
         if (x.first == ALL || x.first == NONE)
             continue;
 
-        // ret += (std::string)x.second;
         if (LogAcceptCategory(x.first))
-            ret += "on ";
+        {
+            allCategories += "on ";
+            if (fEnabled)
+                enabledCategories += (std::string)x.second + " ";
+        }
         else
-            ret += "   ";
+            allCategories += "   ";
 
-        ret += (std::string)x.second;
-        ret += "\n";
+        allCategories += (std::string)x.second + "\n";
     }
+    // strip last char from enabledCategories if it is eqaul to a blank space
+    if (enabledCategories.length() > 0)
+        enabledCategories.pop_back();
 
-    return ret;
+    return fEnabled ? enabledCategories : allCategories;
 }
 
 void LogInit()
 {
     string category = "";
-    uint64_t catg = Logging::NONE;
-    const vector<string> categories = splitByCommasAndRemoveSpaces(mapMultiArgs["-debug"]);
+    uint64_t catg = NONE;
+    const vector<string> categories = splitByCommasAndRemoveSpaces(mapMultiArgs["-debug"], true);
 
     // enable all when given -debug=1 or -debug
     if (categories.size() == 1 && (categories[0] == "" || categories[0] == "1"))
     {
-        Logging::LogToggleCategory(Logging::ALL, true);
-        return;
+        LogToggleCategory(ALL, true);
     }
-    for (string const &cat : categories)
+    else
     {
-        category = boost::algorithm::to_lower_copy(cat);
-        catg = LogFindCategory(category);
+        for (string const &cat : categories)
+        {
+            category = boost::algorithm::to_lower_copy(cat);
 
-        if (catg == NONE) // Not a valid category
-            continue;
+            // remove the category from the list of enables one
+            // if label is suffixed with a dash
+            bool toggle_flag = true;
 
-        LogToggleCategory(catg, true);
+            if (category.length() > 0 && category.at(0) == '-')
+            {
+                toggle_flag = false;
+                category.erase(0, 1);
+            }
+
+            if (category == "" || category == "1")
+            {
+                category = "all";
+            }
+
+            catg = LogFindCategory(category);
+
+            if (catg == NONE) // Not a valid category
+                continue;
+
+            LogToggleCategory(catg, toggle_flag);
+        }
     }
+    LOGA("List of enabled categories: %s\n", LogGetAllString(true));
 }
 }
 
@@ -330,35 +368,35 @@ void OpenDebugLog()
     vMsgsBeforeOpenLog = NULL;
 }
 
-/**
- * fStartedNewLine is a state variable held by the calling context that will
- * suppress printing of the timestamp when multiple calls are made that don't
- * end in a newline. Initialize it to true, and hold it, in the calling context.
+/** All logs are automatically CR terminated.  If you want to construct a single-line log out of multiple calls, don't.
+    Make your own temporary.  You can make a multi-line log by adding \n in your temporary.
  */
-static std::string LogTimestampStr(const std::string &str, bool *fStartedNewLine)
+static std::string LogTimestampStr(const std::string &str, std::string &logbuf)
 {
-    string strStamped;
-
-    if (!fLogTimestamps)
-        return str;
-
-    if (*fStartedNewLine)
+    if (!logbuf.size())
     {
         int64_t nTimeMicros = GetLogTimeMicros();
-        strStamped = DateTimeStrFormat("%Y-%m-%d %H:%M:%S", nTimeMicros / 1000000);
-        if (fLogTimeMicros)
-            strStamped += strprintf(".%06d", nTimeMicros % 1000000);
-        strStamped += ' ' + str;
+        if (fLogTimestamps)
+        {
+            logbuf = DateTimeStrFormat("%Y-%m-%d %H:%M:%S", nTimeMicros / 1000000);
+            if (fLogTimeMicros)
+                logbuf += strprintf(".%06d", nTimeMicros % 1000000);
+        }
+        logbuf += ' ' + str;
     }
     else
-        strStamped = str;
+    {
+        logbuf += str;
+    }
 
-    if (!str.empty() && str[str.size() - 1] == '\n')
-        *fStartedNewLine = true;
-    else
-        *fStartedNewLine = false;
+    if (logbuf.size() && logbuf[logbuf.size() - 1] != '\n')
+    {
+        logbuf += '\n';
+    }
 
-    return strStamped;
+    std::string result = logbuf;
+    logbuf.clear();
+    return result;
 }
 
 static void MonitorLogfile()
@@ -366,22 +404,32 @@ static void MonitorLogfile()
     // Check if debug.log has been deleted or moved.
     // If so re-open
     static int existcounter = 1;
+    static fs::path fileName = GetDataDir() / "debug.log";
     existcounter++;
     if (existcounter % 63 == 0) // Check every 64 log msgs
     {
-        fs::path fileName = GetDataDir() / "debug.log";
         bool exists = boost::filesystem::exists(fileName);
         if (!exists)
             fReopenDebugLog = true;
     }
 }
 
+void LogFlush()
+{
+    if (fPrintToDebugLog)
+    {
+        fflush(fileout);
+    }
+}
+
 int LogPrintStr(const std::string &str)
 {
     int ret = 0; // Returns total number of characters written
-    static bool fStartedNewLine = true;
+    std::string logbuf;
+    std::string strTimestamped = LogTimestampStr(str, logbuf);
 
-    string strTimestamped = LogTimestampStr(str, &fStartedNewLine);
+    if (!strTimestamped.size())
+        return 0;
 
     if (fPrintToConsole)
     {
@@ -506,6 +554,16 @@ bool GetBoolArg(const std::string &strArg, bool fDefault)
     return fDefault;
 }
 
+// You can set the args directly, using SetArg which always will update the value or you can use
+// SoftSetArg which will only set the value if it hasn't already been set and return success/fail.
+void SetArg(const std::string &strArg, const std::string &strValue) { mapArgs[strArg] = strValue; }
+void SetBoolArg(const std::string &strArg, bool fValue)
+{
+    if (fValue)
+        SetArg(strArg, std::string("1"));
+    else
+        SetArg(strArg, std::string("0"));
+}
 bool SoftSetArg(const std::string &strArg, const std::string &strValue)
 {
     if (mapArgs.count(strArg))
@@ -513,7 +571,6 @@ bool SoftSetArg(const std::string &strArg, const std::string &strValue)
     mapArgs[strArg] = strValue;
     return true;
 }
-
 bool SoftSetBoolArg(const std::string &strArg, bool fValue)
 {
     if (fValue)
@@ -1048,3 +1105,52 @@ int ScheduleBatchPriority(void)
     return 1;
 #endif
 }
+
+std::string toString(uint64_t value, const std::map<uint64_t, std::string> bitmap)
+{
+    if (bitmap.count(value))
+        return bitmap.at(value);
+
+    int mask = 1;
+    std::string result;
+
+    while (value)
+    {
+        if ((value & 1) && bitmap.count(mask))
+        {
+            if (result.size())
+                result += " | " + bitmap.at(mask);
+            else
+                result = bitmap.at(mask);
+        }
+        value >>= 1;
+        mask <<= 1;
+    }
+    return result;
+}
+
+#ifdef DEBUG_PAUSE
+
+// To integrate well with gdb, we want to show what thread has paused.  This requires some linux-specific code
+// and headers.  To restrict accidental use of linux-specific code these headers are included here instead of at the
+// file's top.
+#ifdef __linux__
+#include <sys/syscall.h>
+#include <sys/types.h>
+#endif
+
+std::mutex dbgPauseMutex;
+std::condition_variable dbgPauseCond;
+void DbgPause()
+{
+#ifdef __linux__ // The thread ID returned by gettid is very useful since its shown in gdb
+    printf("\n!!! Process %d, Thread %ld (%lx) paused !!!\n", getpid(), syscall(SYS_gettid), pthread_self());
+#else
+    printf("\n!!! Process %d paused !!!\n", getpid());
+#endif
+    std::unique_lock<std::mutex> lk(dbgPauseMutex);
+    dbgPauseCond.wait(lk);
+}
+
+extern "C" void DbgResume() { dbgPauseCond.notify_all(); }
+#endif

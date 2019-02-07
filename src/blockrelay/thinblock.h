@@ -27,7 +27,7 @@ public:
     std::vector<CTransaction> vMissingTx; // vector of transactions that did not match the bloom filter
 
 public:
-    CThinBlock(const CBlock &block, CBloomFilter &filter);
+    CThinBlock(const CBlock &block, const CBloomFilter &filter);
     CThinBlock() {}
     /**
      * Handle an incoming thin block.  The block is fully validated, and if any transactions are missing, we fall
@@ -61,7 +61,8 @@ public:
     bool collision;
 
 public:
-    CXThinBlock(const CBlock &block, CBloomFilter *filter); // Use the filter to determine which txns the client has
+    // Use the filter to determine which txns the client has
+    CXThinBlock(const CBlock &block, const CBloomFilter *filter);
     CXThinBlock(const CBlock &block); // Assume client has all of the transactions (except coinbase)
     CXThinBlock() {}
     /**
@@ -176,9 +177,6 @@ private:
     /* The sum total of all bytes for thinblocks currently in process of being reconstructed */
     std::atomic<uint64_t> nThinBlockBytes{0};
 
-    CCriticalSection cs_mapThinBlockTimer; // locks mapThinBlockTimer
-    std::map<uint256, uint64_t> mapThinBlockTimer;
-
     CCriticalSection cs_thinblockstats; // locks everything below this point
 
     CStatHistory<uint64_t> nOriginalSize;
@@ -272,9 +270,6 @@ public:
     std::string ThinBlockToString();
     std::string FullTxToString();
 
-    bool CheckThinblockTimer(const uint256 &hash);
-    void ClearThinBlockTimer(const uint256 &hash);
-
     void ClearThinBlockData(CNode *pfrom);
     void ClearThinBlockData(CNode *pfrom, const uint256 &hash);
     void ClearThinBlockStats();
@@ -289,13 +284,10 @@ public:
 extern CThinBlockData thindata; // Singleton class
 
 
-bool HaveThinblockNodes();
 bool IsThinBlocksEnabled();
-bool CanThinBlockBeDownloaded(CNode *pto);
 bool ClearLargestThinBlockAndDisconnect(CNode *pfrom);
-void ClearThinBlockInFlight(CNode *pfrom, const uint256 &hash);
-void AddThinBlockInFlight(CNode *pfrom, const uint256 &hash);
 void SendXThinBlock(ConstCBlockRef pblock, CNode *pfrom, const CInv &inv);
+void RequestThinBlock(CNode *pfrom, const uint256 &hash);
 bool IsThinBlockValid(CNode *pfrom, const std::vector<CTransaction> &vMissingTx, const CBlockHeader &header);
 void BuildSeededBloomFilter(CBloomFilter &memPoolFilter,
     std::vector<uint256> &vOrphanHashes,

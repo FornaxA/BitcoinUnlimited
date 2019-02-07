@@ -13,7 +13,7 @@ from test_framework.util import *
 import pdb
 import traceback
 
-class TxnMallTest(BitcoinTestFramework):
+class TxnCloneTest(BitcoinTestFramework):
 
     def add_options(self, parser):
         parser.add_option("--mineblock", dest="mine_block", default=False, action="store_true",
@@ -21,7 +21,7 @@ class TxnMallTest(BitcoinTestFramework):
 
     def setup_network(self):
         # Start with split network:
-        return super(TxnMallTest, self).setup_network(True)
+        return super(TxnCloneTest, self).setup_network(True)
 
     def run_test(self):
         # All nodes should start with 1,250 BTC:
@@ -47,11 +47,11 @@ class TxnMallTest(BitcoinTestFramework):
         # Coins are sent to node1_address
         node1_address = self.nodes[1].getnewaddress("from0")
 
-        # Send tx1, and another transaction tx2 that won't be cloned 
+        # Send tx1, and another transaction tx2 that won't be cloned
         txid1 = self.nodes[0].sendfrom("foo", node1_address, 40, 0)
         txid2 = self.nodes[0].sendfrom("bar", node1_address, 20, 0)
 
-        # Construct a clone of tx1, to be malleated 
+        # Construct a clone of tx1, to be malleated
         rawtx1 = self.nodes[0].getrawtransaction(txid1,1)
         clone_inputs = [{"txid":rawtx1["vin"][0]["txid"],"vout":rawtx1["vin"][0]["vout"]}]
         clone_outputs = {rawtx1["vout"][0]["scriptPubKey"]["addresses"][0]:rawtx1["vout"][0]["value"],
@@ -84,7 +84,7 @@ class TxnMallTest(BitcoinTestFramework):
 
         # Use a different signature hash type to sign.  This creates an equivalent but malleated clone.
         # Don't send the clone anywhere yet
-        tx1_clone = self.nodes[0].signrawtransaction(clone_raw, None, None, "ALL|ANYONECANPAY")
+        tx1_clone = self.nodes[0].signrawtransaction(clone_raw, None, None, "ALL|ANYONECANPAY|FORKID")
         assert_equal(tx1_clone["complete"], True)
 
         # Have node0 mine a block, if requested:
@@ -133,7 +133,7 @@ class TxnMallTest(BitcoinTestFramework):
         tx1 = self.nodes[0].gettransaction(txid1)
         tx1_clone = self.nodes[0].gettransaction(txid1_clone)
         tx2 = self.nodes[0].gettransaction(txid2)
-        
+
         # Verify expected confirmations
         assert_equal(tx1["confirmations"], -2)
         assert_equal(tx1_clone["confirmations"], 2)
@@ -142,7 +142,7 @@ class TxnMallTest(BitcoinTestFramework):
         # Check node0's total balance; should be same as before the clone, + 100 BTC for 2 matured,
         # less possible orphaned matured subsidy
         expected += 100
-        if (self.options.mine_block): 
+        if (self.options.mine_block):
             expected -= 50
         assert_equal(self.nodes[0].getbalance(), expected)
         assert_equal(self.nodes[0].getbalance("*", 0), expected)
@@ -164,13 +164,15 @@ class TxnMallTest(BitcoinTestFramework):
         assert_equal(self.nodes[1].getbalance("from0", 0), -(tx1["amount"] + tx2["amount"]))
 
 if __name__ == '__main__':
-    TxnMallTest().main()
+    TxnCloneTest().main()
 
 def Test():
-    t = TxnMallTest()
+    t = TxnCloneTest()
     t.drop_to_pdb = True
     bitcoinConf = {
-        "debug": ["net", "blk", "thin", "mempool", "req", "bench", "evict"],  # "lck"
-        "blockprioritysize": 2000000  # we don't want any transactions rejected due to insufficient fees...
+        "debug": ["blk", "mempool", "net", "req"],
+        "logtimemicros": 1
     }
-    t.main(["--tmppfx=/ramdisk/test","--nocleanup","--noshutdown"], bitcoinConf, None)  # , "--tracerpc"])
+
+    flags = standardFlags()
+    t.main(flags, bitcoinConf, None)

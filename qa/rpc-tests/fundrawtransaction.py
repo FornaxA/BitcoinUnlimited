@@ -19,13 +19,11 @@ class RawTransactionsTest(BitcoinTestFramework):
         self.extra_args = [["-minlimitertxfee=1"], ["-minlimitertxfee=1"],["-minlimitertxfee=1"],["-minlimitertxfee=1"]]
         self.nodes = start_nodes(4, self.options.tmpdir, self.extra_args)
 
-        connect_nodes_bi(self.nodes,0,1)
-        connect_nodes_bi(self.nodes,1,2)
-        connect_nodes_bi(self.nodes,0,2)
+        connect_nodes_full(self.nodes[:3])
         connect_nodes_bi(self.nodes,0,3)
 
         self.is_network_split=False
-        self.sync_all()
+        self.sync_blocks()
 
     def run_test(self):
         print("Mining blocks...")
@@ -47,9 +45,9 @@ class RawTransactionsTest(BitcoinTestFramework):
             feeTolerance = 0.00000001
 
         self.nodes[2].generate(1)
-        self.sync_all()
+        self.sync_blocks()
         self.nodes[0].generate(121)
-        self.sync_all()
+        self.sync_blocks()
 
         watchonly_address = self.nodes[0].getnewaddress()
         watchonly_pubkey = self.nodes[0].validateaddress(watchonly_address)["pubkey"]
@@ -62,9 +60,8 @@ class RawTransactionsTest(BitcoinTestFramework):
         self.nodes[0].sendtoaddress(self.nodes[2].getnewaddress(), 1.0)
         self.nodes[0].sendtoaddress(self.nodes[2].getnewaddress(), 5.0)
 
-        self.sync_all()
         self.nodes[0].generate(1)
-        self.sync_all()
+        self.sync_blocks()
 
         ###############
         # simple test #
@@ -465,7 +462,8 @@ class RawTransactionsTest(BitcoinTestFramework):
         fundedTx = self.nodes[2].fundrawtransaction(rawTx)
 
         signedTx = self.nodes[2].signrawtransaction(fundedTx['hex'])
-        txId = self.nodes[2].sendrawtransaction(signedTx['hex'])
+        txId = self.nodes[2].enqueuerawtransaction(signedTx['hex'], "flush")
+
         self.sync_all()
         self.nodes[1].generate(1)
         self.sync_all()
@@ -486,9 +484,7 @@ class RawTransactionsTest(BitcoinTestFramework):
         for node in self.nodes:
             node.settxfee(min_relay_tx_fee)
 
-        connect_nodes_bi(self.nodes,0,1)
-        connect_nodes_bi(self.nodes,1,2)
-        connect_nodes_bi(self.nodes,0,2)
+        connect_nodes_full(self.nodes[:3])
         connect_nodes_bi(self.nodes,0,3)
         self.is_network_split=False
         self.sync_all()
@@ -526,7 +522,7 @@ class RawTransactionsTest(BitcoinTestFramework):
         #now we need to unlock
         self.nodes[1].walletpassphrase("test", 100)
         signedTx = self.nodes[1].signrawtransaction(fundedTx['hex'])
-        txId = self.nodes[1].sendrawtransaction(signedTx['hex'])
+        txId = self.nodes[1].enqueuerawtransaction(signedTx['hex'],"flush")
         self.sync_all()
         self.nodes[1].generate(1)
         self.sync_all()
@@ -590,7 +586,7 @@ class RawTransactionsTest(BitcoinTestFramework):
         rawTx = self.nodes[1].createrawtransaction(inputs, outputs)
         fundedTx = self.nodes[1].fundrawtransaction(rawTx)
         fundedAndSignedTx = self.nodes[1].signrawtransaction(fundedTx['hex'])
-        txId = self.nodes[1].sendrawtransaction(fundedAndSignedTx['hex'])
+        txId = self.nodes[1].enqueuerawtransaction(fundedAndSignedTx['hex'], "flush")
         self.sync_all()
         self.nodes[0].generate(1)
         self.sync_all()
@@ -650,7 +646,7 @@ class RawTransactionsTest(BitcoinTestFramework):
         assert(not signedtx["complete"])
         signedtx = self.nodes[0].signrawtransaction(signedtx["hex"])
         assert(signedtx["complete"])
-        self.nodes[0].sendrawtransaction(signedtx["hex"])
+        self.nodes[0].enqueuerawtransaction(signedtx["hex"],"flush")
 
         self.nodes[0].generate(1)
         self.sync_all()
@@ -675,3 +671,13 @@ class RawTransactionsTest(BitcoinTestFramework):
 
 if __name__ == '__main__':
     RawTransactionsTest().main(None,{"keypool":1})
+
+def Test():
+    t = RawTransactionsTest()
+    bitcoinConf = {
+        "debug": ["rpc","net", "blk", "thin", "mempool", "req", "bench", "evict"],
+        "keypool":1
+    }
+
+    flags = standardFlags()
+    t.main(flags, bitcoinConf, None)

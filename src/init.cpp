@@ -39,6 +39,7 @@
 #include "script/sigcache.h"
 #include "script/standard.h"
 #include "torcontrol.h"
+#include "txadmission.h"
 #include "txdb.h"
 #include "txmempool.h"
 #include "ui_interface.h"
@@ -46,7 +47,10 @@
 #include "util.h"
 #include "utilmoneystr.h"
 #include "utilstrencodings.h"
+#include "validation/validation.h"
+#include "validation/verifydb.h"
 #include "validationinterface.h"
+
 #ifdef ENABLE_WALLET
 #include "wallet/db.h"
 #include "wallet/wallet.h"
@@ -131,7 +135,8 @@ static const char *FEE_ESTIMATES_FILENAME = "fee_estimates.dat";
 // shutdown thing.
 //
 
-volatile bool fRequestShutdown = false;
+std::atomic<bool> fRequestShutdown{false};
+std::atomic<bool> fDumpMempoolLater{false};
 
 void StartShutdown() { fRequestShutdown = true; }
 bool ShutdownRequested() { return fRequestShutdown; }
@@ -161,7 +166,7 @@ public:
 };
 
 static CCoinsViewErrorCatcher *pcoinscatcher = NULL;
-static boost::scoped_ptr<ECCVerifyHandle> globalVerifyHandle;
+static std::unique_ptr<ECCVerifyHandle> globalVerifyHandle;
 
 void Interrupt(boost::thread_group &threadGroup)
 {
@@ -192,7 +197,7 @@ void Shutdown()
     /// for example if the data directory was found to be locked.
     /// Be sure that anything that writes files or flushes caches only does this if the respective
     /// module was initialized.
-    RenameThread("bitcoin-shutoff");
+    RenameThread("shutoff");
     mempool.AddTransactionsUpdated(1);
 
     {
@@ -214,9 +219,14 @@ void Shutdown()
         pwalletMain->Flush(false);
 #endif
     GenerateBitcoins(false, 0, Params());
+    StopTxAdmission();
     StopNode();
     StopTorControl();
     UnregisterNodeSignals(GetNodeSignals());
+    if (fDumpMempoolLater && GetArg("-persistmempool", DEFAULT_PERSIST_MEMPOOL))
+    {
+        DumpMempool();
+    }
 
     if (fFeeEstimatesInitialized)
     {
@@ -245,8 +255,6 @@ void Shutdown()
         pblocktree = nullptr;
         delete pblockdb;
         pblockdb = nullptr;
-        delete pblockundodb;
-        pblockundodb = nullptr;
     }
 #ifdef ENABLE_WALLET
     if (pwalletMain)
@@ -394,7 +402,7 @@ void CleanupBlockRevFiles()
 void ThreadImport(std::vector<fs::path> vImportFiles)
 {
     const CChainParams &chainparams = Params();
-    RenameThread("bitcoin-loadblk");
+    RenameThread("loadblk");
     ScheduleBatchPriority();
 
     // -reindex
@@ -459,6 +467,12 @@ void ThreadImport(std::vector<fs::path> vImportFiles)
     {
         LOGA("Stopping after block import\n");
         StartShutdown();
+    }
+
+    if (GetArg("-persistmempool", DEFAULT_PERSIST_MEMPOOL))
+    {
+        LoadMempool();
+        fDumpMempoolLater = !fRequestShutdown;
     }
 }
 
@@ -940,15 +954,33 @@ bool AppInit2(Config &config, boost::thread_group &threadGroup, CScheduler &sche
             return InitError(strprintf(_("Deployment configuration file '%s' not found"), ForksCsvFile));
         }
     }
+
+    // assign votes based on the initial configuration of mining.vote
+    ClearBip135Votes();
+    AssignBip135Votes(bip135Vote, 1);
+
     // bip135 end
 
-    // -par=0 means autodetect, but passing 0 to the CParallelValidation constructor means no concurrency
-    int nPVThreads = GetArg("-par", DEFAULT_SCRIPTCHECK_THREADS);
-    if (nPVThreads <= 0)
-        nPVThreads += GetNumCores();
+    // Setup the number of p2p message processing threads used to process incoming messages
+    if (numMsgHandlerThreads.Value() == 0)
+    {
+        // Set the number of threads to half the available Cores.
+        int nThreads = std::max(GetNumCores() / 2, 1);
+        numMsgHandlerThreads.Set(nThreads);
+    }
+    LOGA("Using %d message handler threads\n", numMsgHandlerThreads.Value());
 
-    // BU: create the parallel block validator
-    PV.reset(new CParallelValidation(nPVThreads, &threadGroup));
+    // Setup the number of transaction mempool admission threads
+    if (numTxAdmissionThreads.Value() == 0)
+    {
+        // Set the number of threads to half the available Cores.
+        int nThreads = std::max(GetNumCores() / 2, 1);
+        numTxAdmissionThreads.Set(nThreads);
+    }
+    LOGA("Using %d transaction admission threads\n", numTxAdmissionThreads.Value());
+
+    // Create the parallel block validator
+    PV.reset(new CParallelValidation());
 
     // Start the lightweight task scheduler thread
     CScheduler::Function serviceLoop = boost::bind(&CScheduler::serviceQueue, &scheduler);
@@ -980,17 +1012,17 @@ bool AppInit2(Config &config, boost::thread_group &threadGroup, CScheduler &sche
 
     fReindex = GetBoolArg("-reindex", DEFAULT_REINDEX);
     int64_t requested_block_mode = GetArg("-useblockdb", DEFAULT_BLOCK_DB_MODE);
-    if (requested_block_mode == 0)
+    if (requested_block_mode >= 0 && requested_block_mode < END_STORAGE_OPTIONS)
     {
-        BLOCK_DB_MODE = SEQUENTIAL_BLOCK_FILES;
+        BLOCK_DB_MODE = static_cast<BlockDBMode>(requested_block_mode);
     }
     else
     {
-        BLOCK_DB_MODE = DB_BLOCK_STORAGE;
+        BLOCK_DB_MODE = DEFAULT_BLOCK_DB_MODE;
     }
 
     // Upgrading to 0.8; hard-link the old blknnnn.dat files into /blocks/
-    if (BLOCK_DB_MODE != DB_BLOCK_STORAGE)
+    if (BLOCK_DB_MODE == SEQUENTIAL_BLOCK_FILES)
     {
         fs::path blocksDir = GetDataDir() / "blocks";
         if (!fs::exists(blocksDir))
@@ -1038,6 +1070,7 @@ bool AppInit2(Config &config, boost::thread_group &threadGroup, CScheduler &sche
     LOGA("* Using %.1fMiB for in-memory UTXO set\n", nCoinCacheMaxSize * (1.0 / 1024 / 1024));
 
     bool fLoaded = false;
+    StartTxAdmission(threadGroup);
     while (!fLoaded)
     {
         bool fReset = fReindex;
@@ -1055,7 +1088,6 @@ bool AppInit2(Config &config, boost::thread_group &threadGroup, CScheduler &sche
                 delete pblocktree;
                 delete pblocktreeother;
                 delete pblockdb;
-                delete pblockundodb;
 
                 uiInterface.InitMessage(_("Opening Block database..."));
                 InitializeBlockStorage(nBlockTreeDBCache, nBlockDBCache, nBlockUndoDBCache);
@@ -1090,10 +1122,13 @@ bool AppInit2(Config &config, boost::thread_group &threadGroup, CScheduler &sche
                     break;
                 }
 
-                // If the loaded chain has a wrong genesis, bail out immediately
-                // (we're likely using a testnet datadir, or the other way around).
-                if (!mapBlockIndex.empty() && mapBlockIndex.count(chainparams.GetConsensus().hashGenesisBlock) == 0)
-                    return InitError(_("Incorrect or no genesis block found. Wrong datadir for network?"));
+                {
+                    READLOCK(cs_mapBlockIndex);
+                    // If the loaded chain has a wrong genesis, bail out immediately
+                    // (we're likely using a testnet datadir, or the other way around).
+                    if (!mapBlockIndex.empty() && mapBlockIndex.count(chainparams.GetConsensus().hashGenesisBlock) == 0)
+                        return InitError(_("Incorrect or no genesis block found. Wrong datadir for network?"));
+                }
 
                 // Initialize the block index (no-op if non-empty database was already loaded)
                 if (!InitBlockIndex(chainparams))
@@ -1198,6 +1233,27 @@ bool AppInit2(Config &config, boost::thread_group &threadGroup, CScheduler &sche
         mempool.ReadFeeEstimates(est_filein);
     fFeeEstimatesInitialized = true;
 
+    // Set EB and MAX_OPS_PER_SCRIPT for the SV chain
+    if (IsSv2018Scheduled())
+    {
+        if (IsSv2018Enabled(Params().GetConsensus(), chainActive.Tip()))
+        {
+            maxScriptOps = SV_MAX_OPS_PER_SCRIPT;
+            excessiveBlockSize = SV_EXCESSIVE_BLOCK_SIZE;
+            settingsToUserAgentString();
+        }
+    }
+
+    // Set enableCanonicalTxOrder for the BCH early in the bootstrap phase
+    if (IsNov152018Scheduled())
+    {
+        if (IsNov152018Enabled(Params().GetConsensus(), chainActive.Tip()))
+        {
+            enableCanonicalTxOrder = true;
+        }
+    }
+
+
 // ********************************************************* Step 7: load wallet
 
 #ifdef ENABLE_WALLET
@@ -1243,6 +1299,7 @@ bool AppInit2(Config &config, boost::thread_group &threadGroup, CScheduler &sche
 
     uiInterface.InitMessage(_("Activating best chain..."));
     // scan for better chains in the block chain database, that are not yet connected in the active best chain
+
     CValidationState state;
     if (!ActivateBestChain(state, chainparams))
     {
@@ -1272,16 +1329,6 @@ bool AppInit2(Config &config, boost::thread_group &threadGroup, CScheduler &sche
         }
         if (!tip)
             MilliSleep(10);
-    }
-
-    // Set the EB and datacarrier size if we have restarted after the fork has already happened.
-    // It is possible that we need to override the old settings in QT and bitcoin.conf.
-    if (IsMay152018Enabled(chainparams.GetConsensus(), tip))
-    {
-        // Bump the accepted block size to 32MB
-        if (miningForkEB.Value() > excessiveBlockSize)
-            excessiveBlockSize = miningForkEB.Value();
-        settingsToUserAgentString();
     }
 
     // ********************************************************* Step 10: network initialization
@@ -1408,7 +1455,8 @@ bool AppInit2(Config &config, boost::thread_group &threadGroup, CScheduler &sche
         {
             struct in_addr inaddr_any;
             inaddr_any.s_addr = INADDR_ANY;
-            bool bound = Bind(CService(in6addr_any, GetListenPort()), BF_NONE);
+            struct in6_addr inaddr6_any = IN6ADDR_ANY_INIT;
+            bool bound = Bind(CService(inaddr6_any, GetListenPort()), BF_NONE);
             fBindFailure |= !bound;
             fBound |= bound;
 
@@ -1463,11 +1511,12 @@ bool AppInit2(Config &config, boost::thread_group &threadGroup, CScheduler &sche
     RandAddSeedPerfmon();
 
     //// debug print
-    LOGA("mapBlockIndex.size() = %u\n", mapBlockIndex.size());
     {
-        LOCK(cs_main);
-        LOGA("nBestHeight = %d\n", chainActive.Height());
+        READLOCK(cs_mapBlockIndex);
+        LOGA("mapBlockIndex.size() = %u\n", mapBlockIndex.size());
     }
+
+    LOGA("nBestHeight = %d\n", chainActive.Height());
 #ifdef ENABLE_WALLET
     LOGA("setKeyPool.size() = %u\n", pwalletMain ? pwalletMain->setKeyPool.size() : 0);
     LOGA("mapWallet.size() = %u\n", pwalletMain ? pwalletMain->mapWallet.size() : 0);
@@ -1479,22 +1528,20 @@ bool AppInit2(Config &config, boost::thread_group &threadGroup, CScheduler &sche
 
     StartNode(threadGroup, scheduler);
 
-    // Monitor the chain, and alert if we get blocks much quicker or slower than expected
-    // The "bad chain alert" scheduler has been disabled because the current system gives far
-    // too many false positives, such that users are starting to ignore them.
-    // This code will be disabled for 0.12.1 while a fix is deliberated in #7568
-    // this was discussed in the IRC meeting on 2016-03-31.
-    //
-    // --- disabled ---
-    // int64_t nPowTargetSpacing = Params().GetConsensus().nPowTargetSpacing;
-    // CScheduler::Function f = boost::bind(&PartitionCheck, &IsInitialBlockDownload,
-    //                                     boost::ref(cs_main), boost::cref(pindexBestHeader), nPowTargetSpacing);
-    // scheduler.scheduleEvery(f, nPowTargetSpacing);
-    // --- end disabled ---
+// Monitor the chain, and alert if we get blocks much quicker or slower than expected
+// The "bad chain alert" scheduler has been disabled because the current system gives far
+// too many false positives, such that users are starting to ignore them.
+// This code will be disabled for 0.12.1 while a fix is deliberated in #7568
+// this was discussed in the IRC meeting on 2016-03-31.
+//
+// --- disabled ---
+// int64_t nPowTargetSpacing = Params().GetConsensus().nPowTargetSpacing;
+// CScheduler::Function f = boost::bind(&PartitionCheck, &IsInitialBlockDownload,
+//                                     boost::ref(cs_main), boost::cref(pindexBestHeader), nPowTargetSpacing);
+// scheduler.scheduleEvery(f, nPowTargetSpacing);
+// --- end disabled ---
 
-    // ********************************************************* Step 12: finished
-
-    SetRPCWarmupFinished();
+// ********************************************************* Step 12: finished
 
 #ifdef ENABLE_WALLET
     uiInterface.InitMessage(_("Reaccepting Wallet Transactions"));
@@ -1509,5 +1556,10 @@ bool AppInit2(Config &config, boost::thread_group &threadGroup, CScheduler &sche
 #endif
 
     uiInterface.InitMessage(_("Done loading"));
+
+    // This should be done last in init. If not, then RPC's could be allowed before the wallet
+    // is ready.
+    SetRPCWarmupFinished();
+
     return true;
 }

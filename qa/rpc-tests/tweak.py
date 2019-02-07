@@ -3,8 +3,6 @@
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 import test_framework.loginit
-# This is a template to make creating new QA tests easy.
-# You can also use this template to quickly start and connect a few regtest nodes.
 
 import time
 import sys
@@ -15,7 +13,7 @@ import logging
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import *
 
-class MyTest (BitcoinTestFramework):
+class TweakTest (BitcoinTestFramework):
 
     def setup_chain(self,bitcoinConfDict=None, wallets=None):
         print("Initializing test directory "+self.options.tmpdir)
@@ -61,36 +59,15 @@ class MyTest (BitcoinTestFramework):
 
 
 if __name__ == '__main__':
-    MyTest ().main ()
+    TweakTest ().main ()
 
 # Create a convenient function for an interactive python debugging session
 def Test():
-    t = MyTest()
+    t = TweakTest()
     bitcoinConf = {
         "debug": ["net", "blk", "thin", "mempool", "req", "bench", "evict"],
         "blockprioritysize": 2000000  # we don't want any transactions rejected due to insufficient fees...
     }
 
-    flags = []
-    # you may want these additional flags:
-    # flags.append("--nocleanup")
-    # flags.append("--noshutdown")
-
-    # Execution is much faster if a ramdisk is used, so use it if one exists in a typical location
-    if os.path.isdir("/ramdisk/test"):
-        flags.append("--tmppfx=/ramdisk/test")
-
-    # Out-of-source builds are awkward to start because they need an additional flag
-    # automatically add this flag during testing for common out-of-source locations
-    here = os.path.dirname(os.path.abspath(__file__))
-    if not os.path.exists(os.path.abspath(here + "/../../src/bitcoind")):
-        dbg = os.path.abspath(here + "/../../debug/src/bitcoind")
-        rel = os.path.abspath(here + "/../../release/src/bitcoind")
-        if os.path.exists(dbg):
-            print("Running from the debug directory (%s)" % dbg)
-            flags.append("--srcdir=%s" % os.path.dirname(dbg))
-        elif os.path.exists(rel):
-            print("Running from the release directory (%s)" % rel)
-            flags.append("--srcdir=%s" % os.path.dirname(rel))
-
+    flags = standardFlags()
     t.main(flags, bitcoinConf, None)

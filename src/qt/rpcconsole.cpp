@@ -48,6 +48,8 @@ const int CONSOLE_HISTORY = 50;
 const int INITIAL_TRAFFIC_GRAPH_MINS = 30;
 const QSize FONT_RANGE(4, 40);
 const char fontSizeSettingsKey[] = "consoleFontSize";
+const QString duration_format = "H:mm:ss";
+const QString time_format = "MMM  d yyyy, HH:mm:ss";
 
 const struct
 {
@@ -385,6 +387,7 @@ void RPCConsole::setClientModel(ClientModel *model)
         setNumBlocks(model->getNumBlocks(), model->getLastBlockDate(), model->getVerificationProgress(NULL));
         connect(
             model, SIGNAL(numBlocksChanged(int, QDateTime, double)), this, SLOT(setNumBlocks(int, QDateTime, double)));
+        connect(model, SIGNAL(timeSinceLastBlockChanged(qint64)), this, SLOT(updateTimeSinceLastBlock(qint64)));
 
         updateTrafficStats(model->getTotalBytesRecv(), model->getTotalBytesSent());
         connect(model, SIGNAL(bytesChanged(quint64, quint64)), this, SLOT(updateTrafficStats(quint64, quint64)));
@@ -394,6 +397,8 @@ void RPCConsole::setClientModel(ClientModel *model)
         connect(model, SIGNAL(transactionsPerSecondChanged(double)), this, SLOT(setTransactionsPerSecond(double)));
         connect(model, SIGNAL(thinBlockPropagationStatsChanged(const ThinBlockQuickStats &)), this,
             SLOT(setThinBlockPropagationStats(const ThinBlockQuickStats &)));
+        connect(model, SIGNAL(compactBlockPropagationStatsChanged(const CompactBlockQuickStats &)), this,
+            SLOT(setCompactBlockPropagationStats(const CompactBlockQuickStats &)));
         connect(model, SIGNAL(grapheneBlockPropagationStatsChanged(const GrapheneQuickStats &)), this,
             SLOT(setGrapheneBlockPropagationStats(const GrapheneQuickStats &)));
 
@@ -625,9 +630,19 @@ void RPCConsole::setNumConnections(int count)
 void RPCConsole::setNumBlocks(int count, const QDateTime &blockDate, double nVerificationProgress)
 {
     ui->numberOfBlocks->setText(QString::number(count));
-
-    QString time_format = "MMM  d yyyy, HH:mm:ss";
     ui->lastBlockTime->setText(blockDate.toString(time_format));
+}
+
+void RPCConsole::updateTimeSinceLastBlock(qint64 lastBlockTime)
+{
+    // Recompute seconds since last block locally as this is called asynchronously
+    // otherwise the UI updates can become noticeably longer than 1 second
+    qint64 secs = GetTime() - lastBlockTime;
+    // Prevent negative duration (likely indicates local system clock sync issue)
+    if (secs < 0)
+        secs = 0;
+    ui->lastBlockTime->setText(QDateTime::fromTime_t(lastBlockTime).toString(time_format) + " (" +
+                               QDateTime::fromTime_t(secs).toUTC().toString(duration_format) + ")");
 }
 
 void RPCConsole::setMempoolSize(long numberOfTxs, size_t dynUsage)
@@ -676,6 +691,35 @@ void RPCConsole::setThinBlockPropagationStats(const ThinBlockQuickStats &thin)
     text += QString::number(thin.fLast24hRerequestTxPercent, 'f', 1) + "%)";
 
     ui->blocksXThin24hAverages->setText(text);
+}
+
+void RPCConsole::setCompactBlockPropagationStats(const CompactBlockQuickStats &compact)
+{
+    if (!IsCompactBlocksEnabled())
+    {
+        ui->blocksCompactTotals->setText(tr("Disabled"));
+        ui->blocksCompact24hAverages->setText(tr("Disabled"));
+        return;
+    }
+
+    // Total: n (Sent: i / Received: r) saved bw
+    QString text = QString::number(compact.nTotalOutbound + compact.nTotalInbound) + " (Sent: ";
+    text += QString::number(compact.nTotalOutbound) + " / Received: ";
+    text += QString::number(compact.nTotalInbound) + ") saved ";
+    text += QString::fromStdString(formatInfoUnit(compact.nTotalBandwidthSavings));
+
+    ui->blocksCompactTotals->setText(text);
+
+    // 24-hour Average: n (Sent: i / Received: r), Compression (i% / r%), ReRequests f (f%)
+    text = QString::number(compact.nLast24hOutbound + compact.nLast24hInbound) + " (Sent: ";
+    text += QString::number(compact.nLast24hOutbound) + " / Received: ";
+    text += QString::number(compact.nLast24hInbound) + "), Compression (";
+    text += QString::number(compact.fLast24hOutboundCompression, 'f', 1) + "% / ";
+    text += QString::number(compact.fLast24hInboundCompression, 'f', 1) + "%), ReRequests ";
+    text += QString::number(compact.nLast24hRerequestTx) + " (";
+    text += QString::number(compact.fLast24hRerequestTxPercent, 'f', 1) + "%)";
+
+    ui->blocksCompact24hAverages->setText(text);
 }
 
 void RPCConsole::setGrapheneBlockPropagationStats(const GrapheneQuickStats &graphene)
@@ -887,13 +931,19 @@ void RPCConsole::updateNodeDetail(const CNodeCombinedStats *stats)
     // Update cached nodeid
     cachedNodeid = stats->nodeStats.nodeid;
 
+    // List of services not defined by a nServices bit that we still want to display on the UI
+    // as a peer advertised service (i.e. Compact Blocks)
+    QStringList additionalServices;
+    if (stats->nodeStats.fSupportsCompactBlocks)
+        additionalServices.append("CMPCT");
+
     // update the detail ui with latest node information
-    QString peerAddrDetails(QString::fromStdString(stats->nodeStats.addrName) + " ");
+    QString peerAddrDetails(QString::fromStdString(stats->nodeStats.addrName) + "<br />");
     peerAddrDetails += tr("(node id: %1)").arg(QString::number(stats->nodeStats.nodeid));
     if (!stats->nodeStats.addrLocal.empty())
         peerAddrDetails += "<br />" + tr("via %1").arg(QString::fromStdString(stats->nodeStats.addrLocal));
     ui->peerHeading->setText(peerAddrDetails);
-    ui->peerServices->setText(GUIUtil::formatServicesStr(stats->nodeStats.nServices));
+    ui->peerServices->setText(GUIUtil::formatServicesStr(stats->nodeStats.nServices, additionalServices));
     ui->peerLastSend->setText(
         stats->nodeStats.nLastSend ? GUIUtil::formatDurationStr(GetTime() - stats->nodeStats.nLastSend) : tr("never"));
     ui->peerLastRecv->setText(

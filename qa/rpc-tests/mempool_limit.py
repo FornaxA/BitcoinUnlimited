@@ -51,3 +51,14 @@ class MempoolLimitTest(BitcoinTestFramework):
 
 if __name__ == '__main__':
     MempoolLimitTest().main()
+
+def Test():
+    t = MempoolLimitTest()
+    # t.drop_to_pdb = True
+    bitcoinConf = {
+        "debug": ["blk", "mempool", "net", "req"],
+        "logtimemicros": 1
+    }
+
+    flags = standardFlags()
+    t.main(flags, bitcoinConf, None)

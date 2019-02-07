@@ -31,6 +31,11 @@
 #include <boost/signals2/signal.hpp>
 #include <boost/thread/exceptions.hpp>
 
+#ifdef DEBUG
+#define DEBUG_ASSERTION
+#define DEBUG_PAUSE
+#endif
+
 #ifdef DEBUG_ASSERTION
 /// If DEBUG_ASSERTION is enabled this asserts when the predicate is false.
 //  If DEBUG_ASSERTION is disabled and the predicate is false, it executes the execInRelease statements.
@@ -50,6 +55,15 @@
             execInRelease;                                                                                    \
         }                                                                                                     \
     } while (0)
+#endif
+
+#ifdef DEBUG_PAUSE
+// Stops this thread by taking a semaphore
+// This should not be called as part of a release so during the non --enable-debug build
+// you will get an undefined symbol compilation error.
+void DbgPause();
+// Continue the thread.  Intended to be called manually from gdb
+extern "C" void DbgResume();
 #endif
 
 #define UNIQUE2(pfx, LINE) pfx##LINE
@@ -97,7 +111,8 @@ int LogPrintStr(const std::string &str);
 // Takes a std::vector of strings and splits individual arguments further up if
 // they contain commas. Also removes space from the output strings.
 // For example, ["a", "b,c", "d"] becomes ["a", "b", "c", "d"]
-extern std::vector<std::string> splitByCommasAndRemoveSpaces(const std::vector<std::string> &args);
+extern std::vector<std::string> splitByCommasAndRemoveSpaces(const std::vector<std::string> &args,
+    bool removeDuplicates = false);
 
 // Logging API:
 // Use the two macros
@@ -105,17 +120,6 @@ extern std::vector<std::string> splitByCommasAndRemoveSpaces(const std::vector<s
 // LOGA(...)
 // located further down.
 // (Do not use the Logging functions directly)
-namespace Logging
-{
-extern uint64_t categoriesEnabled;
-
-/*
-To add a new log category:
-1) Create a unique 1 bit category mask. (Easiest is to 2* the last enum entry.)
-   Put it at the end of enum below.
-2) Add an category/string pair to LOGLABELMAP macro below.
-*/
-
 // Log Categories:
 // 64 Bits: (Define unique bits, not 'normal' numbers)
 enum
@@ -161,8 +165,20 @@ enum
 
     GRAPHENE = 0x10000000,
     RESPEND = 0x20000000,
-    WB = 0x40000000 // weak blocks
+    WB = 0x40000000, // weak blocks
+    CMPCT = 0x80000000 // compact blocks
 };
+
+namespace Logging
+{
+extern uint64_t categoriesEnabled;
+
+/*
+To add a new log category:
+1) Create a unique 1 bit category mask. (Easiest is to 2* the last enum entry.)
+   Put it at the end of enum below.
+2) Add an category/string pair to LOGLABELMAP macro below.
+*/
 
 // Add corresponding lower case string for the category:
 #define LOGLABELMAP                                                                                             \
@@ -173,7 +189,7 @@ enum
             {MEMPOOLREJ, "mempoolrej"}, {BLK, "blk"}, {EVICT, "evict"}, {PARALLEL, "parallel"}, {RAND, "rand"}, \
             {REQ, "req"}, {BLOOM, "bloom"}, {LCK, "lck"}, {PROXY, "proxy"}, {DBASE, "dbase"},                   \
             {SELECTCOINS, "selectcoins"}, {ESTIMATEFEE, "estimatefee"}, {QT, "qt"}, {IBD, "ibd"},               \
-            {GRAPHENE, "graphene"}, {RESPEND, "respend"}, {WB, "weakblocks"},                                   \
+            {GRAPHENE, "graphene"}, {RESPEND, "respend"}, {WB, "weakblocks"}, {CMPCT, "cmpctblock"},            \
         {                                                                                                       \
             ZMQ, "zmq"                                                                                          \
         }                                                                                                       \
@@ -217,7 +233,7 @@ std::string LogGetLabel(uint64_t category);
  * Formatted for display.
  * returns all categories and states
  */
-std::string LogGetAllString();
+std::string LogGetAllString(bool fEnabled = false);
 
 /**
  * Initialize
@@ -304,6 +320,9 @@ inline void LogWrite(const std::string &str)
 #define LOGA(...) Logging::LogWrite(__VA_ARGS__)
 //
 
+// Flush log file (if you know you are about to abort)
+void LogFlush();
+
 // Log tests:
 UniValue setlog(const UniValue &params, bool fHelp);
 // END logging.
@@ -339,12 +358,23 @@ std::string FormatStringFromLogArgs(const char *fmt, const Args &... args)
     return fmt;
 }
 
+
 template <typename... Args>
 bool error(const char *fmt, const Args &... args)
 {
     LogPrintStr("ERROR: " + tfm::format(fmt, args...) + "\n");
     return false;
 }
+
+
+template <typename... Args>
+inline bool error(uint64_t ctgr, const char *fmt, const Args &... args)
+{
+    if (Logging::LogAcceptCategory(ctgr))
+        LogPrintStr("ERROR: " + tfm::format(fmt, args...) + "\n");
+    return false;
+}
+
 
 /**
  Format an amount of bytes with a unit symbol attached, such as MB, KB, GB.
@@ -426,6 +456,24 @@ int64_t GetArg(const std::string &strArg, int64_t nDefault);
 bool GetBoolArg(const std::string &strArg, bool fDefault);
 
 /**
+ * Set an argument
+ *
+ * @param strArg Argument to set (e.g. "-foo")
+ * @param strValue Value (e.g. "1")
+ * @return none
+ */
+void SetArg(const std::string &strArg, const std::string &strValue);
+
+/**
+ * Set a boolean argument
+ *
+ * @param strArg Argument to set (e.g. "-foo")
+ * @param fValue Value (e.g. false)
+ * @return none
+ */
+void SetBoolArg(const std::string &strArg, bool fValue);
+
+/**
  * Set an argument if it doesn't already have a value
  *
  * @param strArg Argument to set (e.g. "-foo")
@@ -456,10 +504,9 @@ void RenameThread(const char *name);
  * .. and a wrapper that just calls func once
  */
 template <typename Callable>
-void TraceThread(const char *name, Callable func)
+void TraceThreads(const std::string &name, Callable func)
 {
-    std::string s = strprintf("bitcoin-%s", name);
-    RenameThread(s.c_str());
+    RenameThread(name.c_str());
     try
     {
         LOGA("%s thread start\n", name);
@@ -473,15 +520,24 @@ void TraceThread(const char *name, Callable func)
     }
     catch (const std::exception &e)
     {
-        PrintExceptionContinue(&e, name);
+        PrintExceptionContinue(&e, name.c_str());
+        LogFlush();
         throw;
     }
     catch (...)
     {
-        PrintExceptionContinue(NULL, name);
+        PrintExceptionContinue(nullptr, name.c_str());
+        LogFlush();
         throw;
     }
 }
+
+template <typename Callable>
+void TraceThread(const char *name, Callable func)
+{
+    TraceThreads(std::string(name), func);
+}
+
 
 std::string CopyrightHolders(const std::string &strPrefix);
 
@@ -500,4 +556,24 @@ bool wildmatch(std::string pattern, std::string test);
  */
 int ScheduleBatchPriority(void);
 
+
+//! short hand for declaring pure function
+#define PURE_FUNCTION __attribute__((pure))
+
+/** Function for converting enums and integers represented as OR-ed bitmasks into
+    human-readable string representations.
+
+    For an (up to 64-bit) unsigned integer and a map of bit values to
+    strings, this will produce a string that is a C++ representation of
+    OR-ing the strings to produce the given integer. Examples:
+
+    toString(5, {{1, "ONE"}, {2, "TWO"}, {4, "FOUR"}} -> "ONE | FOUR"
+    toString(7, {{1, "ONE"}, {2, "TWO"}, {4, "FOUR"}, {7, "ALL"}) -> "ALL"
+
+    The current implementation is nothing fancy yet and will expect the
+    map to contains values with a single bit set or comprehensive 'any'
+    values that are returned preferably.
+    It will put print lower bit values first into the resulting string.
+*/
+std::string toString(uint64_t value, const std::map<uint64_t, std::string> bitmap) PURE_FUNCTION;
 #endif // BITCOIN_UTIL_H

@@ -9,9 +9,9 @@
 #include "guiutil.h"
 #include "peertablemodel.h"
 
-#include "graphene.h"
+#include "blockrelay/graphene.h"
+#include "blockrelay/thinblock.h"
 #include "net.h"
-#include "thinblock.h"
 
 #include <QCompleter>
 #include <QWidget>
@@ -94,6 +94,8 @@ public Q_SLOTS:
     void setNumConnections(int count);
     /** Set number of blocks and last block date shown in the UI */
     void setNumBlocks(int count, const QDateTime &blockDate, double nVerificationProgress);
+    /** Set time since last block shown in the UI */
+    void updateTimeSinceLastBlock(qint64 blockDate);
     /** Set size (number of transactions and memory usage) of the mempool in the UI */
     void setMempoolSize(long numberOfTxs, size_t dynUsage);
     /** Set number of transactions in ophan pool in the UI */
@@ -102,6 +104,8 @@ public Q_SLOTS:
     void setTransactionsPerSecond(double nTxPerSec);
     /** Set block propagation statistics in the UI */
     void setThinBlockPropagationStats(const ThinBlockQuickStats &thin);
+    /** Set block propagation statistics in the UI */
+    void setCompactBlockPropagationStats(const CompactBlockQuickStats &compact);
     /** Set block propagation statistics in the UI */
     void setGrapheneBlockPropagationStats(const GrapheneQuickStats &graphene);
     /** Go forward or back in history */

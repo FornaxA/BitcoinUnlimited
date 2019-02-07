@@ -6,6 +6,7 @@
 #ifndef BITCOIN_UNLIMITED_H
 #define BITCOIN_UNLIMITED_H
 
+#include "blockrelay/thinblock.h"
 #include "chain.h"
 #include "checkqueue.h"
 #include "coins.h"
@@ -15,7 +16,6 @@
 #include "net.h"
 #include "script/script_error.h"
 #include "stat.h"
-#include "thinblock.h"
 #include "tweak.h"
 #include "uahf_fork.h"
 #include "univalue/include/univalue.h"
@@ -29,7 +29,13 @@ enum
     DEFAULT_EXCESSIVE_ACCEPT_DEPTH = 12, // Default is 12 to make it very expensive for a minority hash power to get
     // lucky, and potentially drive a block that the rest of the network sees as
     // "excessive" onto the blockchain.
-    DEFAULT_EXCESSIVE_BLOCK_SIZE = 8000000, // per UAHF spec REQ-4-1, EB has to be at least 8MB at startup
+
+    // per May, 15 '18 upgrade specification the min value for min value for max accepted block size, i.e. EB, is 32 MB
+    // (github.com/bitcoincashorg/bitcoincash.org/blob/master/spec/may-2018-hardfork.md#summary)
+    MIN_EXCESSIVE_BLOCK_SIZE = 32000000,
+    MIN_EXCESSIVE_BLOCK_SIZE_REGTEST = 1000,
+    SV_EXCESSIVE_BLOCK_SIZE = 128000000,
+    DEFAULT_EXCESSIVE_BLOCK_SIZE = MIN_EXCESSIVE_BLOCK_SIZE,
     DEFAULT_MAX_MESSAGE_SIZE_MULTIPLIER = 16, // Allowed messages lengths will be this * the excessive block size
     DEFAULT_COINBASE_RESERVE_SIZE = 1000,
     MAX_COINBASE_SCRIPTSIG_SIZE = 100,
@@ -41,6 +47,9 @@ enum
     // if the blockchain is this far (in seconds) behind the current time, only request headers from a single
     // peer.  This makes IBD more efficient.
     SINGLE_PEER_REQUEST_MODE_AGE = (24 * 60 * 60),
+
+    // How many blocks from tip do we consider than chain to be "nearly" synced.
+    DEFAULT_BLOCKS_FROM_TIP = 2,
 };
 
 class CBlock;
@@ -75,6 +84,13 @@ extern uint64_t maxGeneratedBlock;
 extern uint64_t excessiveBlockSize;
 extern unsigned int excessiveAcceptDepth;
 extern unsigned int maxMessageSizeMultiplier;
+
+// Fork configuration
+/** This specifies the MTP time of the next fork */
+extern uint64_t nMiningForkTime;
+/** This specifies the MTP time of the SV fork */
+extern uint64_t nMiningSvForkTime;
+
 /** BU Default maximum number of Outbound connections to simultaneously allow*/
 extern int nMaxOutConnections;
 
@@ -87,6 +103,9 @@ extern CTweak<uint64_t> checkScriptDays;
 
 // Allow getblocktemplate to succeed even if this node chain tip blocks are old or this node is not connected
 extern CTweak<bool> unsafeGetBlockTemplate;
+
+// The maximum number of allowed script operations (consensus param)
+extern CTweak<uint64_t> maxScriptOps;
 
 // print out a configuration warning during initialization
 // bool InitWarning(const std::string &str);
@@ -202,7 +221,9 @@ extern void IsInitialBlockDownloadInit(bool *fInit = nullptr);
 
 // Check whether we are nearly sync'd.  Used primarily to determine whether an xthin can be retrieved.
 extern bool IsChainNearlySyncd();
+extern bool IsChainSyncd();
 extern void IsChainNearlySyncdInit();
+extern void IsChainNearlySyncdSet(bool fSync);
 extern uint64_t LargestBlockSeen(uint64_t nBlockSize = 0);
 extern int GetBlockchainHeight();
 
@@ -257,6 +278,11 @@ std::string OutboundConnectionValidator(const int &value, int *item, bool valida
 std::string MaxDataCarrierValidator(const unsigned int &value, unsigned int *item, bool validate);
 std::string SubverValidator(const std::string &value, std::string *item, bool validate);
 std::string MiningBlockSizeValidator(const uint64_t &value, uint64_t *item, bool validate);
+// validator for the voting tweak
+std::string Bip135VoteValidator(const std::string &value, std::string *item, bool validate);
+// ensure that only 1 fork is active
+std::string ForkTimeValidator(const uint64_t &value, uint64_t *item, bool validate);
+std::string ForkTimeValidatorSV(const uint64_t &value, uint64_t *item, bool validate);
 
 extern CTweak<unsigned int> maxTxSize;
 extern CTweak<uint64_t> blockSigopsPerMb;
@@ -270,13 +296,12 @@ extern std::list<CStatBase *> mallocedStats;
 extern CCriticalSection cs_blockvalidationthread;
 void InterruptBlockValidationThreads();
 
+
 // Fork configuration
 /** This specifies the MTP time of the next fork */
-extern CTweak<uint64_t> miningForkTime;
-/** This specifies the minimum excessive block setting at the fork point */
-extern CTweak<uint64_t> miningForkEB;
-/** This specifies the minimum max block size at the fork point */
-extern CTweak<uint64_t> miningForkMG;
+extern CTweakRef<uint64_t> miningForkTime;
+/** This specifies the MTP time of the SV fork */
+extern CTweakRef<uint64_t> miningSvForkTime;
 
 // Mining-Candidate start
 /** Return a Merkle root given a Coinbase hash and Merkle proof */

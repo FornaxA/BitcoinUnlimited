@@ -395,7 +395,7 @@ bool ReadKeyValue(CWallet *pwallet,
             CWalletTx wtx;
             ssValue >> wtx;
             CValidationState state;
-            if (!(CheckTransaction(wtx, state) && (wtx.GetHash() == hash) && state.IsValid()))
+            if (!(CheckTransaction(MakeTransactionRef(wtx), state) && (wtx.GetHash() == hash) && state.IsValid()))
                 return false;
 
             // Undo serialize changes in 31600
@@ -1057,7 +1057,7 @@ bool CWalletDB::Recover(CDBEnv &dbenv, const std::string &filename, bool fOnlyKe
     }
     LOGA("Salvage(aggressive) found %u records\n", salvagedData.size());
 
-    boost::scoped_ptr<Db> pdbCopy(new Db(dbenv.dbenv, 0));
+    std::unique_ptr<Db> pdbCopy(new Db(dbenv.dbenv, 0));
     int ret = pdbCopy->open(nullptr, // Txn pointer
         filename.c_str(), // Filename
         "main", // Logical db name

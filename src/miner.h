@@ -59,26 +59,23 @@ private:
     int lastFewTxs;
     bool blockFinished;
 
-    // will be initialized by IsUAHFforkActiveOnNextBlock
-    bool uahfChainBlock;
-
 public:
     BlockAssembler(const CChainParams &chainparams);
     /** Construct a new block template with coinbase to scriptPubKeyIn */
-    std::unique_ptr<CBlockTemplate> CreateNewBlock(const CScript &scriptPubKeyIn);
+    std::unique_ptr<CBlockTemplate> CreateNewBlock(const CScript &scriptPubKeyIn, int64_t coinbaseSize = -1);
 
 private:
     // utility functions
     /** Clear the block's state and prepare for assembling a new block */
-    void resetBlock(const CScript &scriptPubKeyIn);
+    void resetBlock(const CScript &scriptPubKeyIn, int64_t coinbaseSize = -1);
     /** Add a tx to the block */
-    void AddToBlock(CBlockTemplate *, CTxMemPool::txiter iter);
+    void AddToBlock(std::vector<const CTxMemPoolEntry *> *vtxe, CTxMemPool::txiter iter);
 
     // Methods for how to add transactions to a block.
     /** Add transactions based on modified feerate */
-    void addScoreTxs(CBlockTemplate *);
+    void addScoreTxs(std::vector<const CTxMemPoolEntry *> *vtxe);
     /** Add transactions based on tx "priority" */
-    void addPriorityTxs(CBlockTemplate *);
+    void addPriorityTxs(std::vector<const CTxMemPoolEntry *> *vtxe);
 
     // helper function for addScoreTxs and addPriorityTxs
     bool IsIncrementallyGood(uint64_t nExtraSize, unsigned int nExtraSigOps);
@@ -87,9 +84,11 @@ private:
     /** Test if tx still has unconfirmed parents not yet in block */
     bool isStillDependent(CTxMemPool::txiter iter);
     /** Bytes to reserve for coinbase and block header */
-    uint64_t reserveBlockSize(const CScript &scriptPubKeyIn);
+    uint64_t reserveBlockSize(const CScript &scriptPubKeyIn, int64_t coinbaseSize = -1);
     /** Internal method to construct a new block template */
-    std::unique_ptr<CBlockTemplate> CreateNewBlock(const CScript &scriptPubKeyIn, bool blockstreamCoreCompatible);
+    std::unique_ptr<CBlockTemplate> CreateNewBlock(const CScript &scriptPubKeyIn,
+        bool blockstreamCoreCompatible,
+        int64_t coinbaseSize = -1);
     /** Constructs a coinbase transaction */
     CTransactionRef coinbaseTx(const CScript &scriptPubKeyIn, int nHeight, CAmount nValue);
 };
@@ -104,6 +103,10 @@ int64_t UpdateTime(CBlockHeader *pblock, const Consensus::Params &consensusParam
 /** Submit a mined block */
 UniValue SubmitBlock(CBlock &block);
 /** Make a block template to send to miners. */
-UniValue mkblocktemplate(const UniValue &params, CBlock *pblockOut);
+// implemented in mining.cpp
+UniValue mkblocktemplate(const UniValue &params, int64_t coinbaseSize = -1, CBlock *pblockOut = nullptr);
+
+// Force block template recalculation the next time a template is requested
+void SignalBlockTemplateChange();
 
 #endif // BITCOIN_MINER_H

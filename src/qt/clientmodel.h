@@ -6,8 +6,9 @@
 #ifndef BITCOIN_QT_CLIENTMODEL_H
 #define BITCOIN_QT_CLIENTMODEL_H
 
-#include "graphene.h"
-#include "thinblock.h"
+#include "blockrelay/compactblock.h"
+#include "blockrelay/graphene.h"
+#include "blockrelay/thinblock.h"
 
 #include <QDateTime>
 #include <QObject>
@@ -92,12 +93,17 @@ public:
     QString dataDir() const;
     UnlimitedModel *unlimitedModel;
 
+    //! Cache last block time so that we can make fast updates (every 250 ms)
+    //! to time since last block without having to take the cs_main lock every time
+    mutable std::atomic<qint64> lastBlockTime;
+
 private:
     OptionsModel *optionsModel;
     PeerTableModel *peerTableModel;
     BanTableModel *banTableModel;
 
     ThinBlockQuickStats thinStats;
+    CompactBlockQuickStats compactStats;
     GrapheneQuickStats grapheneStats;
 
     QTimer *pollTimer1;
@@ -109,12 +115,14 @@ private:
 Q_SIGNALS:
     void numConnectionsChanged(int count);
     void numBlocksChanged(int count, const QDateTime &blockDate, double nVerificationProgress);
+    void timeSinceLastBlockChanged(qint64 lastBlockTime);
     void mempoolSizeChanged(long count, size_t mempoolSizeInBytes);
     void orphanPoolSizeChanged(long count);
     void alertsChanged(const QString &warnings);
     void bytesChanged(quint64 totalBytesIn, quint64 totalBytesOut);
     void transactionsPerSecondChanged(double tansactionsPerSecond); // BU:
     void thinBlockPropagationStatsChanged(const ThinBlockQuickStats &thin);
+    void compactBlockPropagationStatsChanged(const CompactBlockQuickStats &compact);
     void grapheneBlockPropagationStatsChanged(const GrapheneQuickStats &graphene);
 
     //! Fired when a message should be reported to the user

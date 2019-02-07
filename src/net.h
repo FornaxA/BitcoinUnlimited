@@ -7,9 +7,11 @@
 #ifndef BITCOIN_NET_H
 #define BITCOIN_NET_H
 
+#include "blockrelay/compactblock.h"
 #include "bloom.h"
 #include "chainparams.h"
 #include "compat.h"
+#include "fastfilter.h"
 #include "fs.h"
 #include "hash.h"
 #include "iblt.h"
@@ -21,6 +23,7 @@
 #include "streams.h"
 #include "sync.h"
 #include "uint256.h"
+#include "util.h" // FIXME: reduce scope
 
 #include <atomic>
 #include <deque>
@@ -35,6 +38,7 @@
 #include "banentry.h"
 #include "stat.h"
 #include "unlimited.h"
+#include "xversionmessage.h"
 
 class CAddrMan;
 class CScheduler;
@@ -46,6 +50,8 @@ namespace boost
 {
 class thread_group;
 } // namespace boost
+
+extern CTweak<unsigned int> numMsgHandlerThreads;
 
 /** Time between pings automatically sent out for latency probing and keepalive (in seconds). */
 static const int PING_INTERVAL = 2 * 60;
@@ -62,8 +68,6 @@ static const int64_t MAX_RECV_CHUNK = 256 * 1024;
 /** Maximum length of incoming protocol messages (no message over 2 MiB is currently acceptable). */
 // BU: currently allowing DEFAULT_MAX_MESSAGE_SIZE_MULTIPLIER*excessiveBlockSize as the max message.
 // static const unsigned int MAX_PROTOCOL_MESSAGE_LENGTH = 2 * 1024 * 1024;
-/** Maximum length of strSubVer in `version` message */
-static const unsigned int MAX_SUBVERSION_LENGTH = 256;
 /** -listen default */
 static const bool DEFAULT_LISTEN = true;
 /** -upnp default */
@@ -72,14 +76,12 @@ static const bool DEFAULT_UPNP = USE_UPNP;
 #else
 static const bool DEFAULT_UPNP = false;
 #endif
-/** The maximum number of entries in mapAskFor */
-static const size_t MAPASKFOR_MAX_SZ = MAX_INV_SZ;
-/** The maximum number of entries in setAskFor (larger due to getdata latency)*/
-static const size_t SETASKFOR_MAX_SZ = 2 * MAX_INV_SZ;
 /** The maximum number of peer connections to maintain. */
 static const unsigned int DEFAULT_MAX_PEER_CONNECTIONS = 125;
-/** BU: The maximum numer of outbound peer connections */
+/** BU: The maximum number of outbound peer connections */
 static const unsigned int DEFAULT_MAX_OUTBOUND_CONNECTIONS = 16;
+/** Limits number of IPs learned from a DNS seed */
+static const unsigned int MAX_DNS_SEEDED_IPS = 256;
 /** BU: The minimum number of xthin nodes to connect */
 static const uint8_t MIN_XTHIN_NODES = 8;
 /** BU: The daily maximum disconnects while searching for xthin nodes to connect */
@@ -94,14 +96,21 @@ static const bool DEFAULT_FORCEBITNODES = false;
 // BITCOINUNLIMITED END
 
 static const bool DEFAULT_FORCEDNSSEED = false;
-static const size_t DEFAULT_MAXRECEIVEBUFFER = 5 * 1000;
-static const size_t DEFAULT_MAXSENDBUFFER = 1 * 1000;
+static const size_t DEFAULT_MAXRECEIVEBUFFER = 10 * 1000;
+static const size_t DEFAULT_MAXSENDBUFFER = 10 * 1000;
 
 unsigned int ReceiveFloodSize();
 unsigned int SendBufferSize();
 
+// Node IDs are currently signed but only values greater than zero are returned.  Zero or negative can be used as a
+// sentinel value.
+typedef int NodeId;
+
 void AddOneShot(const std::string &strDest);
+// Find a node by name.  Returns a null ref if no node found
 CNodeRef FindNodeRef(const std::string &addrName);
+// Find a node by id.  Returns a null ref if no node found
+CNodeRef FindNodeRef(const NodeId id);
 int DisconnectSubNetNodes(const CSubNet &subNet);
 bool OpenNetworkConnection(const CAddress &addrConnect,
     bool fCountFailure,
@@ -115,10 +124,6 @@ bool BindListenPort(const CService &bindAddr, std::string &strError, bool fWhite
 void StartNode(boost::thread_group &threadGroup, CScheduler &scheduler);
 bool StopNode();
 int SocketSendData(CNode *pnode);
-
-// Node IDs are currently signed but only values greater than zero are returned.  Zero or negative can be used as a
-// sentinel value.
-typedef int NodeId;
 
 struct CombinerAll
 {
@@ -209,6 +214,7 @@ struct LocalServiceInfo
 extern CCriticalSection cs_mapLocalHost;
 extern std::map<CNetAddr, LocalServiceInfo> mapLocalHost;
 
+
 class CNodeStats
 {
 public:
@@ -231,6 +237,8 @@ public:
     double dPingWait;
     double dPingMin;
     std::string addrLocal;
+    //! Whether this peer supports CompactBlocks (for statistics only, BU doesn't support CB protocol)
+    bool fSupportsCompactBlocks;
 };
 
 
@@ -248,6 +256,15 @@ public:
 
     int64_t nTime; // time (in microseconds) of message receipt.
 
+    // default constructor builds an empty message object to accept assignment of real messages
+    CNetMessage() : hdrbuf(0, 0), hdr({0, 0, 0, 0}), vRecv(0, 0)
+    {
+        in_data = false;
+        nHdrPos = 0;
+        nDataPos = 0;
+        nTime = 0;
+    }
+
     CNetMessage(const CMessageHeader::MessageStartChars &pchMessageStartIn, int nTypeIn, int nVersionIn)
         : hdrbuf(nTypeIn, nVersionIn), hdr(pchMessageStartIn), vRecv(nTypeIn, nVersionIn)
     {
@@ -258,6 +275,8 @@ public:
         nTime = 0;
     }
 
+    // Returns true if this message has been completely received.  This is determined by checking the message size
+    // field in the header against the number of payload bytes in this object.
     bool complete() const
     {
         if (!in_data)
@@ -265,6 +284,9 @@ public:
         return (hdr.nMessageSize == nDataPos);
     }
 
+    // Returns the size of this message including header.  If the message is still being received
+    // this call returns only what has been received.
+    unsigned int size() const { return ((in_data) ? sizeof(CMessageHeader) : hdrbuf.size()) + nDataPos; }
     void SetVersion(int nVersionIn)
     {
         hdrbuf.SetVersion(nVersionIn);
@@ -287,6 +309,45 @@ public:
 };
 #endif
 
+
+// clang-format off
+
+
+/*! Corresponding ConnectionStateOutgoing, this is used to track incoming versioning information from a peer. */
+enum class ConnectionStateIncoming : uint8_t {
+    //! initial state after TCP connection is up - waiting for version message
+    CONNECTED_WAIT_VERSION                       = 0x01,
+    //! Sent verack message - ready for xversion (or any other message, aborting the xversion-handling process)
+    SENT_VERACK_READY_FOR_POTENTIAL_XVERSION     = 0x02,
+    //! Sent xverack and am thus ready for general data transfer
+    READY                                        = 0x04,
+    //! placeholder value to allow any when checking for a particular state
+    ANY                                          = 0xff
+};
+ConnectionStateIncoming operator|(const ConnectionStateIncoming& a, const ConnectionStateIncoming& b);
+/** This is enum is used to track the state of the versioning information
+    that has been sent to the remote node. */
+enum class ConnectionStateOutgoing : uint8_t {
+    //! initial state after TCP connection is up
+    CONNECTED     = 0x01,
+    //! the VERSION message has been sent
+    SENT_VERSION  = 0x02,
+    //! Connection is ready for general data transfer into peer's direction (and the xversion as well as BU version has been sent)
+    READY         = 0x04,
+    //! placeholder value to allow any when checking for a particular state
+    ANY           = 0xff
+};
+ConnectionStateOutgoing operator|(const ConnectionStateOutgoing& a, const ConnectionStateOutgoing& b);
+// clang-format on
+
+//! ConnectionStateIncoming enum to string
+std::string toString(const ConnectionStateIncoming &state) PURE_FUNCTION;
+std::ostream &operator<<(std::ostream &os, const ConnectionStateIncoming &state);
+
+//! ConnectionStateOutgoing enum to string
+std::string toString(const ConnectionStateOutgoing &state) PURE_FUNCTION;
+std::ostream &operator<<(std::ostream &os, const ConnectionStateOutgoing &state);
+
 /** Information about a peer */
 class CNode
 {
@@ -295,42 +356,23 @@ class CNode
 #endif
 
 public:
-    struct CThinBlockInFlight
-    {
-        int64_t nRequestTime;
-        bool fReceived;
-
-        CThinBlockInFlight()
-        {
-            nRequestTime = GetTime();
-            fReceived = false;
-        }
-    };
-
-    struct CGrapheneBlockInFlight
-    {
-        int64_t nRequestTime;
-        bool fReceived;
-
-        CGrapheneBlockInFlight()
-        {
-            nRequestTime = GetTime();
-            fReceived = false;
-        }
-    };
-
+    // This is shared-locked whenever messages are processed.
+    // Take it exclusive-locked to finish all ongoing processing
+    CSharedCriticalSection csMsgSerializer;
     // socket
     uint64_t nServices;
     SOCKET hSocket;
     CDataStream ssSend;
-    size_t nSendSize; // total size of all vSendMsg entries
+    std::atomic<uint64_t> nSendSize; // total size in bytes of all vSendMsg entries
     size_t nSendOffset; // offset inside the first vSendMsg already sent
     uint64_t nSendBytes;
     std::deque<CSerializeData> vSendMsg;
     CCriticalSection cs_vSend;
 
+    CCriticalSection csRecvGetData;
     std::deque<CInv> vRecvGetData;
     std::deque<CNetMessage> vRecvMsg;
+    CStatHistory<uint64_t> currentRecvMsgSize;
     CCriticalSection cs_vRecvMsg;
     uint64_t nRecvBytes;
     int nRecvVersion;
@@ -344,10 +386,31 @@ public:
     int64_t nTimeConnected;
     int64_t nTimeOffset;
     CAddress addr;
+
+    //! set to true if this node is ok with no message checksum
+    bool skipChecksum;
+
+    //! The address the remote peer advertised it its version message
+    CAddress addrFrom_advertised;
+
     std::string addrName;
     const char *currentCommand; // if in the middle of the send, this is the command type
     CService addrLocal;
     int nVersion;
+
+    //! The state of informing the remote peer of our version information
+    ConnectionStateOutgoing state_outgoing;
+
+    //! The state of being informed by the remote peer of his version information
+    ConnectionStateIncoming state_incoming;
+
+    //! used to make processing serial when version handshake is taking place
+    CCriticalSection csSerialPhase;
+
+    //! the intial xversion message sent in the handshake
+    CCriticalSection cs_xversion;
+    CXVersionMessage xVersion;
+
     // strSubVer is whatever byte array we read from the wire. However, this field is intended
     // to be printed out, displayed to humans in various forms and so on. So we sanitize it and
     // store the sanitized version in cleanSubVer. The original should be used when dealing with
@@ -361,9 +424,12 @@ public:
     bool fAutoOutbound; // any outbound node not connected with -addnode, connect-thinblock or -connect
     bool fNetworkNode; // any outbound node
     int64_t tVersionSent;
-    bool fVerackSent;
-    bool fBUVersionSent;
-    bool fSuccessfullyConnected;
+
+    bool successfullyConnected() const
+    {
+        return (state_outgoing == ConnectionStateOutgoing::READY && state_incoming == ConnectionStateIncoming::READY);
+    }
+
     std::atomic<bool> fDisconnect;
     std::atomic<bool> fDisconnectRequest;
     // We use fRelayTxes for two purposes -
@@ -384,10 +450,9 @@ public:
     std::atomic<int> nMisbehavior;
     //! Whether this peer should be disconnected and banned (unless whitelisted).
     bool fShouldBan;
-    //! Whether we have a fully established connection.
-    bool fCurrentlyConnected;
 
     // BUIP010 Xtreme Thinblocks: begin section
+    CCriticalSection cs_xthinblock;
     CBlock thinBlock;
     std::vector<uint256> thinBlockHashes;
     std::vector<uint64_t> xThinBlockHashes;
@@ -395,19 +460,11 @@ public:
     uint64_t nLocalThinBlockBytes; // the bytes used in creating this thinblock, updated dynamically
     int nSizeThinBlock; // Original on-wire size of the block. Just used for reporting
     int thinBlockWaitingForTxns; // if -1 then not currently waiting
-
-    // thin blocks in flight and the time they were requested.
-    CCriticalSection cs_mapthinblocksinflight;
-    std::map<uint256, CThinBlockInFlight> mapThinBlocksInFlight GUARDED_BY(cs_mapthinblocksinflight);
-
-    double nGetXBlockTxCount; // Count how many get_xblocktx requests are made
-    uint64_t nGetXBlockTxLastTime; // The last time a get_xblocktx request was made
-    double nGetXthinCount; // Count how many get_xthin requests are made
-    uint64_t nGetXthinLastTime; // The last time a get_xthin request was made
     uint32_t nXthinBloomfilterSize; // The maximum xthin bloom filter size (in bytes) that our peer will accept.
     // BUIP010 Xtreme Thinblocks: end section
 
     // BUIPXXX Graphene blocks: begin section
+    CCriticalSection cs_graphene;
     CBlock grapheneBlock;
     std::vector<uint256> grapheneBlockHashes;
     std::map<uint64_t, uint32_t> grapheneMapHashOrderIndex;
@@ -417,23 +474,33 @@ public:
     int grapheneBlockWaitingForTxns; // if -1 then not currently waiting
     CCriticalSection cs_grapheneadditionaltxs; // lock grapheneAdditionalTxs
     std::vector<CTransactionRef> grapheneAdditionalTxs; // entire transactions included in graphene block
-
-    // graphene blocks in flight and the time they were requested.
-    CCriticalSection cs_mapgrapheneblocksinflight;
-    std::map<uint256, CGrapheneBlockInFlight> mapGrapheneBlocksInFlight GUARDED_BY(cs_mapgrapheneblocksinflight);
-
-    double nGetGrapheneBlockTxCount; // Count how many get_xblocktx requests are made
-    uint64_t nGetGrapheneBlockTxLastTime; // The last time a get_xblocktx request was made
-    double nGetGrapheneCount; // Count how many get_graphene requests are made
-    uint64_t nGetGrapheneLastTime; // The last time a get_graphene request was made
     uint32_t nGrapheneBloomfilterSize; // The maximum graphene bloom filter size (in bytes) that our peer will accept.
     // BUIPXXX Graphene blocks: end section
+
+    // Compact Blocks : begin
+    CCriticalSection cs_compactblock;
+    CBlock compactBlock;
+    std::map<uint64_t, CTransactionRef> mapMissingCompactBlockTx;
+    uint64_t nLocalCompactBlockBytes; // the bytes used in creating this cmpctblock, updated dynamically
+    uint64_t nSizeCompactBlock; // Original on-wire size of the block. Just used for reporting
+    int compactBlockWaitingForTxns; // if -1 then not currently waiting
+
+    std::vector<uint64_t> vShortCompactBlockHashes;
+    std::vector<uint256> vCompactBlockHashes;
+
+    uint64_t shorttxidk0;
+    uint64_t shorttxidk1;
+
+    // Compact Blocks : end
 
     CCriticalSection cs_nAvgBlkResponseTime;
     double nAvgBlkResponseTime;
     std::atomic<int64_t> nMaxBlocksInTransit;
 
     unsigned short addrFromPort;
+
+    //! Whether this peer supports CompactBlocks (for statistics only, BU doesn't support CB protocol)
+    std::atomic<bool> fSupportsCompactBlocks;
 
 protected:
     // Basic fuzz-testing
@@ -447,7 +514,7 @@ public:
     int nStartingHeight;
 
     // flood relay
-    std::vector<CAddress> vAddrToSend;
+    std::vector<CAddress> vAddrToSend GUARDED_BY(cs_vSend);
     CRollingBloomFilter addrKnown;
     bool fGetAddr;
     std::set<uint256> setKnown;
@@ -455,7 +522,7 @@ public:
     int64_t nNextLocalAddrSend;
 
     // inventory based relay
-    CRollingBloomFilter filterInventoryKnown;
+    CRollingFastFilter<4 * 1024 * 1024> filterInventoryKnown;
     std::vector<CInv> vInventoryToSend;
     CCriticalSection cs_inventory;
     int64_t nNextInvSend;
@@ -501,16 +568,14 @@ public:
 
 private:
     // Network usage totals
-    static CCriticalSection cs_totalBytesRecv;
-    static CCriticalSection cs_totalBytesSent;
-    static uint64_t nTotalBytesRecv;
-    static uint64_t nTotalBytesSent;
+    static std::atomic<uint64_t> nTotalBytesRecv;
+    static std::atomic<uint64_t> nTotalBytesSent;
 
     // outbound limit & stats
-    static uint64_t nMaxOutboundTotalBytesSentInCycle;
-    static uint64_t nMaxOutboundCycleStartTime;
-    static uint64_t nMaxOutboundLimit;
-    static uint64_t nMaxOutboundTimeframe;
+    static std::atomic<uint64_t> nMaxOutboundTotalBytesSentInCycle;
+    static std::atomic<uint64_t> nMaxOutboundCycleStartTime;
+    static std::atomic<uint64_t> nMaxOutboundLimit;
+    static std::atomic<uint64_t> nMaxOutboundTimeframe;
 
     CNode(const CNode &);
     void operator=(const CNode &);
@@ -526,6 +591,7 @@ public:
     // requires LOCK(cs_vRecvMsg)
     unsigned int GetTotalRecvSize()
     {
+        AssertLockHeld(cs_vRecvMsg);
         unsigned int total = 0;
         for (const CNetMessage &msg : vRecvMsg)
             total += msg.vRecv.size() + 24;
@@ -535,9 +601,9 @@ public:
     // requires LOCK(cs_vRecvMsg)
     bool ReceiveMsgBytes(const char *pch, unsigned int nBytes);
 
-    // requires LOCK(cs_vRecvMsg)
     void SetRecvVersion(int nVersionIn)
     {
+        LOCK(cs_vRecvMsg);
         nRecvVersion = nVersionIn;
         for (CNetMessage &msg : vRecvMsg)
             msg.SetVersion(nVersionIn);
@@ -576,9 +642,17 @@ public:
         return false;
     }
 
+    bool CompactBlockCapable()
+    {
+        if (fSupportsCompactBlocks)
+            return true;
+        return false;
+    }
+
     void AddAddressKnown(const CAddress &_addr) { addrKnown.insert(_addr.GetKey()); }
     void PushAddress(const CAddress &_addr, FastRandomContext &insecure_rand)
     {
+        LOCK(cs_vSend);
         // Known checking here is only to save space from duplicates.
         // SendMessages will filter it again for knowns that were added
         // after addresses were pushed.
@@ -598,20 +672,16 @@ public:
 
     void AddInventoryKnown(const CInv &inv)
     {
-        {
-            LOCK(cs_inventory);
-            filterInventoryKnown.insert(inv.hash);
-        }
+        LOCK(cs_inventory);
+        filterInventoryKnown.insert(inv.hash);
     }
 
     void PushInventory(const CInv &inv)
     {
-        {
-            LOCK(cs_inventory);
-            if (inv.type == MSG_TX && filterInventoryKnown.contains(inv.hash))
-                return;
-            vInventoryToSend.push_back(inv);
-        }
+        LOCK(cs_inventory);
+        if (inv.type == MSG_TX && filterInventoryKnown.contains(inv.hash))
+            return;
+        vInventoryToSend.push_back(inv);
     }
 
     void PushBlockHash(const uint256 &hash)
@@ -915,8 +985,11 @@ public:
     ~CNodeRef() { Release(); }
     CNode &operator*() const { return *_pnode; };
     CNode *operator->() const { return _pnode; };
+    // Returns true if this reference is not null
     explicit operator bool() const { return _pnode; }
+    // Access the raw pointer
     CNode *get() const { return _pnode; }
+    // Assignment -- destroys any reference to the current node and adds a ref to the new one
     CNodeRef &operator=(CNode *pnode)
     {
         if (pnode != _pnode)
@@ -927,6 +1000,7 @@ public:
         }
         return *this;
     }
+    // Assignment -- destroys any reference to the current node and adds a ref to the new one
     CNodeRef &operator=(const CNodeRef &other) { return operator=(other._pnode); }
 private:
     CNode *_pnode;

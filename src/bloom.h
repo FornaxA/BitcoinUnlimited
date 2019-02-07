@@ -12,8 +12,10 @@
 #include <vector>
 
 class COutPoint;
-class CTransaction;
 class uint256;
+class CTransaction;
+
+typedef std::shared_ptr<const CTransaction> CTransactionRef;
 
 //! 20,000 items with fp rate < 0.1% or 10,000 items and <0.0001%
 static const unsigned int MAX_HASH_FUNCS = 50;
@@ -44,7 +46,7 @@ enum bloomflags
  */
 class CBloomFilter
 {
-private:
+protected:
     std::vector<unsigned char> vData;
     bool isFull;
     bool isEmpty;
@@ -137,7 +139,7 @@ public:
     bool IsWithinSizeConstraints() const;
 
     //! Also adds any outputs which match the filter to the filter (to match their spending txes)
-    bool IsRelevantAndUpdate(const CTransaction &tx);
+    bool IsRelevantAndUpdate(const CTransactionRef &tx);
 };
 
 /**
@@ -148,8 +150,11 @@ public:
  * reset() is provided, which also changes nTweak to decrease the impact of
  * false-positives.
  *
- * contains(item) will always return true if item was one of the last N things
+ * contains(item) will always return true if item was one of the last N to 1.5*N
  * insert()'ed ... but may also return true for items that were not inserted.
+ *
+ * It needs around 1.8 bytes per element per factor 0.1 of false positive rate.
+ * (More accurately: 3/(log(256)*log(2)) * log(1/fpRate) * nElements bytes)
  */
 class CRollingBloomFilter
 {
@@ -169,12 +174,14 @@ public:
     void reset();
 
     //! for testing only
-    unsigned vDataTotalSize() const { return b1.vDataSize() + b2.vDataSize(); }
+    unsigned vDataSize() const { return data.size(); }
 private:
-    unsigned int nBloomSize;
-    unsigned int nInsertions;
-    CBloomFilter b1, b2;
+    int nEntriesPerGeneration;
+    int nEntriesThisGeneration;
+    int nGeneration;
+    std::vector<uint64_t> data;
+    unsigned int nTweak;
+    int nHashFuncs;
 };
-
 
 #endif // BITCOIN_BLOOM_H

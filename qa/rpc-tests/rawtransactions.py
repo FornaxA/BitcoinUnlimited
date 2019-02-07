@@ -28,10 +28,7 @@ class RawTransactionsTest(BitcoinTestFramework):
         #proxy = AuthServiceProxy(url)
         #proxy.url = url # store URL on proxy for info
         #self.nodes.append(proxy)
-
-        connect_nodes_bi(self.nodes,0,1)
-        connect_nodes_bi(self.nodes,1,2)
-        connect_nodes_bi(self.nodes,0,2)
+        connect_nodes_full(self.nodes)
 
         self.is_network_split=False
         self.sync_all()
@@ -46,7 +43,6 @@ class RawTransactionsTest(BitcoinTestFramework):
         self.nodes[0].sendtoaddress(self.nodes[2].getnewaddress(),1.5)
         self.nodes[0].sendtoaddress(self.nodes[2].getnewaddress(),1.0)
         self.nodes[0].sendtoaddress(self.nodes[2].getnewaddress(),5.0)
-        self.sync_all()
         self.nodes[0].generate(5)
         self.sync_all()
 
@@ -54,7 +50,7 @@ class RawTransactionsTest(BitcoinTestFramework):
         # sendrawtransaction with missing input #
         #########################################
         inputs  = [ {'txid' : "1d1d4e24ed99057e84c3f80fd8fbec79ed9e1acee37da269356ecea000000000", 'vout' : 1}] #won't exists
-        outputs = { self.nodes[0].getnewaddress() : 4.998 }
+        outputs = { self.nodes[0].getnewaddress() : 3.998, self.nodes[0].getnewaddress() : 1.0 }
         rawtx   = self.nodes[2].createrawtransaction(inputs, outputs)
         rawtx   = self.nodes[2].signrawtransaction(rawtx)
 
@@ -85,7 +81,7 @@ class RawTransactionsTest(BitcoinTestFramework):
         txId = self.nodes[0].sendtoaddress(mSigObj, 1.2)
         self.sync_all()
         self.nodes[0].generate(1)
-        self.sync_all()
+        self.sync_blocks()
         assert_equal(self.nodes[2].getbalance(), bal+Decimal('1.20000000')) #node2 has both keys of the 2of2 ms addr., tx should affect the balance
 
 
@@ -106,9 +102,8 @@ class RawTransactionsTest(BitcoinTestFramework):
         decTx = self.nodes[0].gettransaction(txId)
         rawTx = self.nodes[0].decoderawtransaction(decTx['hex'])
         sPK = rawTx['vout'][0]['scriptPubKey']['hex']
-        self.sync_all()
         self.nodes[0].generate(1)
-        self.sync_all()
+        self.sync_blocks()
 
         #THIS IS A INCOMPLETE FEATURE
         #NODE2 HAS TWO OF THREE KEY AND THE FUNDS SHOULD BE SPENDABLE AND COUNT AT BALANCE CALCULATION
@@ -130,7 +125,7 @@ class RawTransactionsTest(BitcoinTestFramework):
         assert_equal(rawTxPartialSigned['complete'], False) #node1 only has one key, can't comp. sign the tx
         rawTxSigned = self.nodes[2].signrawtransaction(rawTx, inputs)
         assert_equal(rawTxSigned['complete'], True) #node2 can sign the tx compl., own two of three keys
-        self.nodes[2].sendrawtransaction(rawTxSigned['hex'])
+        self.nodes[2].enqueuerawtransaction(rawTxSigned['hex'],"flush")
         rawTx = self.nodes[0].decoderawtransaction(rawTxSigned['hex'])
         self.sync_all()
         self.nodes[0].generate(1)
@@ -181,9 +176,7 @@ class RawTransactionsTest(BitcoinTestFramework):
         wait_bitcoinds()
         # restart the node with a flag that forces the behavior to be more like mainnet -- don't accept nonstandard tx
         self.nodes = start_nodes(3, self.options.tmpdir, [ ["--acceptnonstdtxn=0"], [], [], []])
-        connect_nodes_bi(self.nodes,0,1)
-        connect_nodes_bi(self.nodes,1,2)
-        connect_nodes_bi(self.nodes,0,2)
+        connect_nodes_full(self.nodes)
 
         wallet = self.nodes[0].listunspent()
         wallet.sort(key=lambda x: x["amount"], reverse=False)
@@ -268,16 +261,10 @@ if __name__ == '__main__':
 
 def Test():
     t = RawTransactionsTest()
-    t.drop_to_pdb = True
+    #t.drop_to_pdb = True
     bitcoinConf = {
-        "debug": ["net", "blk", "thin", "mempool", "req", "bench", "evict"],  # "lck"
-        "blockprioritysize": 2000000  # we don't want any transactions rejected due to insufficient fees...
+        "debug": ["rpc","net", "blk", "thin", "mempool", "req", "bench", "evict"],
     }
 
-    flags = []
-    # you may want these additional flags:
-    # "--srcdir=<out-of-source-build-dir>/debug/src"
-    # "--nocleanup", "--noshutdown"
-    if os.path.isdir("/ramdisk/test"):  # execution is much faster if a ramdisk is used
-        flags.append("--tmppfx=/ramdisk/test")
+    flags = standardFlags()
     t.main(flags, bitcoinConf, None)

@@ -15,12 +15,12 @@
 #include "net.h"
 
 #include "addrman.h"
+#include "blockrelay/graphene.h"
 #include "chainparams.h"
 #include "connmgr.h"
 #include "consensus/consensus.h"
 #include "crypto/common.h"
 #include "dosman.h"
-#include "graphene.h"
 #include "hash.h"
 #include "iblt.h"
 #include "primitives/transaction.h"
@@ -29,6 +29,8 @@
 #include "ui_interface.h"
 #include "unlimited.h"
 #include "utilstrencodings.h"
+
+extern CTweak<bool> ignoreNetTimeouts;
 
 #ifdef WIN32
 #include <string.h>
@@ -227,7 +229,7 @@ bool IsPeerAddrLocalGood(CNode *pnode)
 // pushes our own address to a peer
 void AdvertiseLocal(CNode *pnode)
 {
-    if (fListen && pnode->fSuccessfullyConnected)
+    if (fListen && pnode->successfullyConnected())
     {
         CAddress addrLocal = GetLocalAddress(&pnode->addr);
         // If discovery is enabled, sometimes give our peer the address it
@@ -334,16 +336,45 @@ bool IsReachable(const CNetAddr &addr)
     return IsReachable(net);
 }
 
-// BU moved to globals.cpp
-// uint64_t CNode::nTotalBytesRecv = 0;
-// uint64_t CNode::nTotalBytesSent = 0;
-// CCriticalSection CNode::cs_totalBytesRecv;
-// CCriticalSection CNode::cs_totalBytesSent;
+// clang-format off
+static const std::map<uint64_t, std::string> bitMeaningsCSI(
+{
+    {(uint64_t)ConnectionStateIncoming::CONNECTED_WAIT_VERSION, "CONNECTED_WAIT_VERSION"},
+    {(uint64_t)ConnectionStateIncoming::SENT_VERACK_READY_FOR_POTENTIAL_XVERSION, "SENT_VERACK_READY_FOR_POTENTIAL_XVERSION"},
+    {(uint64_t)ConnectionStateIncoming::READY, "READY"},
+    {(uint64_t)ConnectionStateIncoming::ANY, "ALL"}
+});
 
-uint64_t CNode::nMaxOutboundLimit = 0;
-uint64_t CNode::nMaxOutboundTotalBytesSentInCycle = 0;
-uint64_t CNode::nMaxOutboundTimeframe = 60 * 60 * 24; // 1 day
-uint64_t CNode::nMaxOutboundCycleStartTime = 0;
+static const std::map<uint64_t, std::string> bitMeaningsCSO(
+{
+    {(uint64_t)ConnectionStateOutgoing::CONNECTED, "CONNECTED"},
+    {(uint64_t)ConnectionStateOutgoing::SENT_VERSION, "SENT_VERSION"},
+    {(uint64_t)ConnectionStateOutgoing::READY, "READY"},
+    {(uint64_t)ConnectionStateOutgoing::ANY, "ALL"}
+});
+// clang-format on
+
+ConnectionStateIncoming operator|(const ConnectionStateIncoming &a, const ConnectionStateIncoming &b)
+{
+    return (ConnectionStateIncoming)((uint64_t)a | (uint64_t)b);
+}
+
+ConnectionStateOutgoing operator|(const ConnectionStateOutgoing &a, const ConnectionStateOutgoing &b)
+{
+    return (ConnectionStateOutgoing)((uint64_t)a | (uint64_t)b);
+}
+
+std::string toString(const ConnectionStateIncoming &state) { return toString((uint64_t)state, bitMeaningsCSI); }
+std::ostream &operator<<(std::ostream &os, const ConnectionStateIncoming &state) { return (os << toString(state)); }
+std::string toString(const ConnectionStateOutgoing &state) { return toString((uint64_t)state, bitMeaningsCSO); }
+std::ostream &operator<<(std::ostream &os, const ConnectionStateOutgoing &state) { return (os << toString(state)); }
+// Initialize static CNode variables used in static CNode functions.
+std::atomic<uint64_t> CNode::nTotalBytesRecv{0};
+std::atomic<uint64_t> CNode::nTotalBytesSent{0};
+std::atomic<uint64_t> CNode::nMaxOutboundLimit{0};
+std::atomic<uint64_t> CNode::nMaxOutboundTimeframe{60 * 60 * 24}; // 1 day
+std::atomic<uint64_t> CNode::nMaxOutboundCycleStartTime{0};
+std::atomic<uint64_t> CNode::nMaxOutboundTotalBytesSentInCycle{0};
 
 // BU: FindNode() functions enforce holding of cs_vNodes lock to prevent use-after-free errors
 static CNode *FindNode(const CNetAddr &ip)
@@ -508,6 +539,8 @@ void CNode::PushVersion()
         FormatSubVersion(CLIENT_NAME, CLIENT_VERSION, BUComments), nBestHeight,
         !GetBoolArg("-blocksonly", DEFAULT_BLOCKSONLY));
     tVersionSent = GetTime();
+    DbgAssert(state_outgoing == ConnectionStateOutgoing::CONNECTED, {});
+    state_outgoing = ConnectionStateOutgoing::SENT_VERSION;
 }
 
 
@@ -530,6 +563,7 @@ void CNode::copyStats(CNodeStats &stats)
     X(nSendBytes);
     X(nRecvBytes);
     X(fWhitelisted);
+    X(fSupportsCompactBlocks);
 
     // It is common for nodes with good ping times to suddenly become lagged,
     // due to a new block arriving or other large transfer.
@@ -554,9 +588,9 @@ void CNode::copyStats(CNodeStats &stats)
 }
 #undef X
 
-// requires LOCK(cs_vRecvMsg)
 bool CNode::ReceiveMsgBytes(const char *pch, unsigned int nBytes)
 {
+    AssertLockHeld(cs_vRecvMsg);
     while (nBytes > 0)
     {
         // get current incomplete message, or create a new one
@@ -606,10 +640,11 @@ bool CNode::ReceiveMsgBytes(const char *pch, unsigned int nBytes)
                 // of a previous GET_XTHIN/HEADER requests and result in a DOS if the block returns out of order and
                 // with no headers in the block index or the setblockindexcandidates.
                 if ((strCommand == NetMsgType::GET_XTHIN && Params().NetworkIDString() == "main") ||
-                    strCommand == NetMsgType::XTHINBLOCK || strCommand == NetMsgType::THINBLOCK ||
-                    strCommand == NetMsgType::XBLOCKTX || strCommand == NetMsgType::GET_XBLOCKTX ||
-                    strCommand == NetMsgType::GET_GRAPHENE || strCommand == NetMsgType::GRAPHENEBLOCK ||
-                    strCommand == NetMsgType::GRAPHENETX || strCommand == NetMsgType::GET_GRAPHENETX)
+                    strCommand == NetMsgType::GET_THIN || strCommand == NetMsgType::XTHINBLOCK ||
+                    strCommand == NetMsgType::THINBLOCK || strCommand == NetMsgType::XBLOCKTX ||
+                    strCommand == NetMsgType::GET_XBLOCKTX || strCommand == NetMsgType::GET_GRAPHENE ||
+                    strCommand == NetMsgType::GRAPHENEBLOCK || strCommand == NetMsgType::GRAPHENETX ||
+                    strCommand == NetMsgType::GET_GRAPHENETX)
                 {
                     LOG(THIN | GRAPHENE, "ReceiveMsgBytes %s\n", strCommand);
 
@@ -728,7 +763,7 @@ int SocketSendData(CNode *pnode)
             if (pnode->nSendOffset == data.size())
             {
                 pnode->nSendOffset = 0;
-                pnode->nSendSize -= data.size();
+                pnode->nSendSize.fetch_sub(data.size());
                 it++;
             }
             else
@@ -1038,7 +1073,7 @@ static void AcceptConnection(const ListenSocket &hListenSocket)
         mapInboundConnectionTracker[ipAddress].nLastConnectionTime = GetTime();
 
         LOG(EVICT, "Number of connection attempts is %f for %s\n", nConnections, addr.ToString());
-        if (nConnections > 4 && !whitelisted)
+        if (nConnections > 4 && !whitelisted && !addr.IsLocal()) // local connections are auto-whitelisted
         {
             int nHoursToBan = 4;
             dosMan.Ban((CNetAddr)addr, BanReasonNodeMisbehaving, nHoursToBan * 60 * 60);
@@ -1351,23 +1386,27 @@ void ThreadSocketHandler()
                 {
                     LOG(NET, "Node %s socket no message in first 60 seconds, %d %d from %d\n", pnode->GetLogName(),
                         pnode->nLastRecv != 0, pnode->nLastSend != 0, pnode->id);
-                    pnode->fDisconnect = true;
+                    if (ignoreNetTimeouts.Value() == false)
+                        pnode->fDisconnect = true;
                 }
                 else if (nTime - pnode->nLastSend > TIMEOUT_INTERVAL)
                 {
                     LOG(NET, "Node %s socket sending timeout: %is\n", pnode->GetLogName(), nTime - pnode->nLastSend);
-                    pnode->fDisconnect = true;
+                    if (ignoreNetTimeouts.Value() == false)
+                        pnode->fDisconnect = true;
                 }
-                else if (nTime - pnode->nLastRecv > (pnode->nVersion > BIP0031_VERSION ? TIMEOUT_INTERVAL : 90 * 60))
+                else if (nTime - pnode->nLastRecv > TIMEOUT_INTERVAL)
                 {
                     LOG(NET, "Node %s socket receive timeout: %is\n", pnode->GetLogName(), nTime - pnode->nLastRecv);
-                    pnode->fDisconnect = true;
+                    if (ignoreNetTimeouts.Value() == false)
+                        pnode->fDisconnect = true;
                 }
                 else if (pnode->nPingNonceSent && pnode->nPingUsecStart + TIMEOUT_INTERVAL * 1000000 < GetTimeMicros())
                 {
                     LOG(NET, "Node %s ping timeout: %fs\n", pnode->GetLogName(),
                         0.000001 * (GetTimeMicros() - pnode->nPingUsecStart));
-                    pnode->fDisconnect = true;
+                    if (ignoreNetTimeouts.Value() == false)
+                        pnode->fDisconnect = true;
                 }
             }
         }
@@ -1572,7 +1611,7 @@ static void DNSAddressSeed()
             vector<CNetAddr> vIPs;
             vector<CAddress> vAdd;
             uint64_t requiredServiceBits = NODE_NETWORK;
-            if (LookupHost(GetDNSHost(seed, requiredServiceBits).c_str(), vIPs, 0, true))
+            if (LookupHost(GetDNSHost(seed, requiredServiceBits).c_str(), vIPs, MAX_DNS_SEEDED_IPS, true))
             {
                 for (const CNetAddr &ip : vIPs)
                 {
@@ -2101,6 +2140,31 @@ bool OpenNetworkConnection(const CAddress &addrConnect,
 }
 
 
+static bool threadProcessMessages(CNode *pnode)
+{
+    bool fSleep = true;
+    // Receive messages from the net layer and put them into the receive queue.
+    if (!g_signals.ProcessMessages(pnode))
+        pnode->fDisconnect = true;
+
+    // Discover if there's more work to be done
+    if (pnode->nSendSize < SendBufferSize())
+    {
+        { // If already locked some other thread is working on it, so no work for this thread
+            TRY_LOCK(pnode->csRecvGetData, lockRecv);
+            if (lockRecv && (!pnode->vRecvGetData.empty()))
+                fSleep = false;
+        }
+        if (fSleep)
+        { // If already locked some other thread is working on it, so no work for this thread
+            TRY_LOCK(pnode->cs_vRecvMsg, lockRecv);
+            if (lockRecv && (!pnode->vRecvMsg.empty() && pnode->vRecvMsg[0].complete()))
+                fSleep = false;
+        }
+    }
+    return fSleep;
+}
+
 void ThreadMessageHandler()
 {
     boost::mutex condition_mutex;
@@ -2140,29 +2204,34 @@ void ThreadMessageHandler()
             if (pnode->fDisconnect)
                 continue;
 
-            // Receive messages from the net layer and put them into the receive queue.
+            if (pnode->successfullyConnected())
             {
-                TRY_LOCK(pnode->cs_vRecvMsg, lockRecv);
-                if (lockRecv)
-                {
-                    if (!g_signals.ProcessMessages(pnode))
-                        pnode->fDisconnect = true;
-
-                    if (pnode->nSendSize < SendBufferSize())
-                    {
-                        if (!pnode->vRecvGetData.empty() || (!pnode->vRecvMsg.empty() && pnode->vRecvMsg[0].complete()))
-                        {
-                            fSleep = false;
-                        }
-                    }
-                }
+                // parallel processing
+                fSleep &= threadProcessMessages(pnode);
+            }
+            else
+            {
+                // serial processing during setup
+                TRY_LOCK(pnode->csSerialPhase, lockSerial);
+                if (lockSerial)
+                    fSleep &= threadProcessMessages(pnode);
             }
             boost::this_thread::interruption_point();
 
             // Put transaction and block requests into the request manager
             // and all other requests into the send queue.
-            g_signals.SendMessages(pnode);
-
+            if (pnode->successfullyConnected())
+            {
+                // parallel processing
+                g_signals.SendMessages(pnode);
+            }
+            else
+            {
+                // serial processing during setup
+                TRY_LOCK(pnode->csSerialPhase, lockSerial);
+                if (lockSerial)
+                    g_signals.SendMessages(pnode);
+            }
             boost::this_thread::interruption_point();
         }
 
@@ -2413,7 +2482,10 @@ void StartNode(boost::thread_group &threadGroup, CScheduler &scheduler)
     threadGroup.create_thread(boost::bind(&TraceThread<void (*)()>, "opencon", &ThreadOpenConnections));
 
     // Process messages
-    threadGroup.create_thread(boost::bind(&TraceThread<void (*)()>, "msghand", &ThreadMessageHandler));
+    for (unsigned int i = 0; i < numMsgHandlerThreads.Value(); i++)
+    {
+        threadGroup.create_thread(boost::bind(&TraceThreads<void (*)()>, strprintf("msg%d", i), &ThreadMessageHandler));
+    }
 
     // Dump network addresses
     scheduler.scheduleEvery(&DumpData, DUMP_ADDRESSES_INTERVAL);
@@ -2481,11 +2553,10 @@ void NetCleanup()
 
 void RelayTransaction(const CTransactionRef &ptx, const bool fRespend)
 {
-    uint64_t len = ::GetSerializeSize(*ptx, SER_NETWORK, PROTOCOL_VERSION);
-    if (len > maxTxSize.Value())
+    if (ptx->GetTxSize() > maxTxSize.Value())
     {
         LOGA("Will not announce (INV) excessive transaction %s.  Size: %llu, Limit: %llu\n", ptx->GetHash().ToString(),
-            len, (uint64_t)maxTxSize.Value());
+            ptx->GetTxSize(), (uint64_t)maxTxSize.Value());
         return;
     }
 
@@ -2516,7 +2587,7 @@ void RelayTransaction(const CTransactionRef &ptx, const bool fRespend)
         {
             // Relaying double spends to SPV clients is an easy attack vector,
             // and therefore only relay txns that are not potential double spends.
-            if (!fRespend && pnode->pfilter->IsRelevantAndUpdate(*ptx))
+            if (!fRespend && pnode->pfilter->IsRelevantAndUpdate(ptx))
                 pnode->PushInventory(inv);
         }
         else
@@ -2524,16 +2595,10 @@ void RelayTransaction(const CTransactionRef &ptx, const bool fRespend)
     }
 }
 
-void CNode::RecordBytesRecv(uint64_t bytes)
-{
-    LOCK(cs_totalBytesRecv);
-    nTotalBytesRecv += bytes;
-}
-
+void CNode::RecordBytesRecv(uint64_t bytes) { nTotalBytesRecv.fetch_add(bytes); }
 void CNode::RecordBytesSent(uint64_t bytes)
 {
-    LOCK(cs_totalBytesSent);
-    nTotalBytesSent += bytes;
+    nTotalBytesSent.fetch_add(bytes);
 
     uint64_t now = GetTime();
     if (nMaxOutboundCycleStartTime + nMaxOutboundTimeframe < now)
@@ -2544,35 +2609,23 @@ void CNode::RecordBytesSent(uint64_t bytes)
     }
 
     // TODO, exclude whitebind peers
-    nMaxOutboundTotalBytesSentInCycle += bytes;
+    nMaxOutboundTotalBytesSentInCycle.fetch_add(bytes);
 }
 
 void CNode::SetMaxOutboundTarget(uint64_t limit)
 {
-    LOCK(cs_totalBytesSent);
-    uint64_t recommendedMinimum = (nMaxOutboundTimeframe * excessiveBlockSize) / 600;
+    uint64_t nRecommendedMinimum = (nMaxOutboundTimeframe * excessiveBlockSize) / 600;
     nMaxOutboundLimit = limit;
 
-    if (limit > 0 && limit < recommendedMinimum)
+    if (limit > 0 && limit < nRecommendedMinimum)
         LOGA("Max outbound target is very small (%s bytes) and will be overshot. Recommended minimum is %s bytes.\n",
-            nMaxOutboundLimit, recommendedMinimum);
+            nMaxOutboundLimit, nRecommendedMinimum);
 }
 
-uint64_t CNode::GetMaxOutboundTarget()
-{
-    LOCK(cs_totalBytesSent);
-    return nMaxOutboundLimit;
-}
-
-uint64_t CNode::GetMaxOutboundTimeframe()
-{
-    LOCK(cs_totalBytesSent);
-    return nMaxOutboundTimeframe;
-}
-
+uint64_t CNode::GetMaxOutboundTarget() { return nMaxOutboundLimit; }
+uint64_t CNode::GetMaxOutboundTimeframe() { return nMaxOutboundTimeframe; }
 uint64_t CNode::GetMaxOutboundTimeLeftInCycle()
 {
-    LOCK(cs_totalBytesSent);
     if (nMaxOutboundLimit == 0)
         return 0;
 
@@ -2586,7 +2639,6 @@ uint64_t CNode::GetMaxOutboundTimeLeftInCycle()
 
 void CNode::SetMaxOutboundTimeframe(uint64_t timeframe)
 {
-    LOCK(cs_totalBytesSent);
     if (nMaxOutboundTimeframe != timeframe)
     {
         // reset measure-cycle in case of changing
@@ -2596,13 +2648,12 @@ void CNode::SetMaxOutboundTimeframe(uint64_t timeframe)
     nMaxOutboundTimeframe = timeframe;
 }
 
-bool CNode::OutboundTargetReached(bool historicalBlockServingLimit)
+bool CNode::OutboundTargetReached(bool fHistoricalBlockServingLimit)
 {
-    LOCK(cs_totalBytesSent);
     if (nMaxOutboundLimit == 0)
         return false;
 
-    if (historicalBlockServingLimit)
+    if (fHistoricalBlockServingLimit)
     {
         // keep a large enough buffer to at least relay each block once
         uint64_t timeLeftInCycle = GetMaxOutboundTimeLeftInCycle();
@@ -2618,7 +2669,6 @@ bool CNode::OutboundTargetReached(bool historicalBlockServingLimit)
 
 uint64_t CNode::GetOutboundTargetBytesLeft()
 {
-    LOCK(cs_totalBytesSent);
     if (nMaxOutboundLimit == 0)
         return 0;
 
@@ -2626,21 +2676,11 @@ uint64_t CNode::GetOutboundTargetBytesLeft()
                                                                               nMaxOutboundTotalBytesSentInCycle;
 }
 
-uint64_t CNode::GetTotalBytesRecv()
-{
-    LOCK(cs_totalBytesRecv);
-    return nTotalBytesRecv;
-}
-
-uint64_t CNode::GetTotalBytesSent()
-{
-    LOCK(cs_totalBytesSent);
-    return nTotalBytesSent;
-}
-
+uint64_t CNode::GetTotalBytesRecv() { return nTotalBytesRecv; }
+uint64_t CNode::GetTotalBytesSent() { return nTotalBytesSent; }
 void CNode::Fuzz(int nChance)
 {
-    if (!fSuccessfullyConnected)
+    if (!successfullyConnected())
         return; // Don't fuzz initial handshake
     if (GetRand(nChance) != 0)
         return; // Fuzz 1 of every nChance messages
@@ -2790,8 +2830,7 @@ bool CAddrDB::Read(CAddrMan &addr, CDataStream &ssPeers)
 unsigned int ReceiveFloodSize() { return 1000 * GetArg("-maxreceivebuffer", DEFAULT_MAXRECEIVEBUFFER); }
 unsigned int SendBufferSize() { return 1000 * GetArg("-maxsendbuffer", DEFAULT_MAXSENDBUFFER); }
 CNode::CNode(SOCKET hSocketIn, const CAddress &addrIn, const std::string &addrNameIn, bool fInboundIn)
-    : ssSend(SER_NETWORK, INIT_PROTO_VERSION), id(connmgr->NextNodeId()), addrKnown(5000, 0.001),
-      filterInventoryKnown(50000, 0.000001)
+    : ssSend(SER_NETWORK, INIT_PROTO_VERSION), skipChecksum(false), id(connmgr->NextNodeId()), addrKnown(5000, 0.001)
 {
     nServices = 0;
     hSocket = hSocketIn;
@@ -2806,6 +2845,8 @@ CNode::CNode(SOCKET hSocketIn, const CAddress &addrIn, const std::string &addrNa
     addr = addrIn;
     addrName = addrNameIn == "" ? addr.ToStringIPPort() : addrNameIn;
     nVersion = 0;
+    state_incoming = ConnectionStateIncoming::CONNECTED_WAIT_VERSION;
+    state_outgoing = ConnectionStateOutgoing::CONNECTED;
     strSubVer = "";
     fWhitelisted = false;
     fOneShot = false;
@@ -2815,9 +2856,6 @@ CNode::CNode(SOCKET hSocketIn, const CAddress &addrIn, const std::string &addrNa
     fAutoOutbound = false;
     fNetworkNode = false;
     tVersionSent = -1;
-    fVerackSent = false;
-    fBUVersionSent = false;
-    fSuccessfullyConnected = false;
     fDisconnect = false;
     fDisconnectRequest = false;
     nRefCount = 0;
@@ -2839,16 +2877,36 @@ CNode::CNode(SOCKET hSocketIn, const CAddress &addrIn, const std::string &addrNa
     nPingUsecTime = 0;
     fPingQueued = false;
     nMinPingUsecTime = std::numeric_limits<int64_t>::max();
-    thinBlockWaitingForTxns = -1; // BUIP010 Xtreme Thinblocks
-    nXthinBloomfilterSize = 0;
-    addrFromPort = 0; // BU
+
+    // xthinblocks
     nLocalThinBlockBytes = 0;
+    nSizeThinBlock = 0;
+    thinBlockWaitingForTxns = -1;
+    nXthinBloomfilterSize = 0;
+    addrFromPort = 0;
+
+    // graphene
+    nLocalGrapheneBlockBytes = 0;
+    nSizeGrapheneBlock = 0;
+    grapheneBlockWaitingForTxns = -1;
+
+    // compact blocks
+    nLocalCompactBlockBytes = 0;
+    nSizeCompactBlock = 0;
+    compactBlockWaitingForTxns = -1;
+    shorttxidk0 = 0;
+    shorttxidk1 = 0;
+
+    // performance tracking
     nAvgBlkResponseTime = -1.0;
     nMaxBlocksInTransit = 16;
 
+    // for misbehavior
     nMisbehavior = 0;
     fShouldBan = false;
-    fCurrentlyConnected = false;
+
+    // For statistics only, BU doesn't support CB protocol
+    fSupportsCompactBlocks = false;
 
     // BU instrumentation
     std::string xmledName;
@@ -2889,45 +2947,35 @@ CNode::~CNode()
 {
     CloseSocket(hSocket);
 
-    if (pfilter)
-    {
-        delete pfilter;
-        pfilter = nullptr; // BU
+    { // locking should be unnecessary because nothing is holding a reference to this node anymore, so single-threaded
+        // however, lock here for static analysis correctness.
+        LOCK(cs_filter);
+        if (pfilter)
+        {
+            delete pfilter;
+            pfilter = nullptr; // BU
+        }
+
+        if (pThinBlockFilter)
+        {
+            delete pThinBlockFilter;
+            pThinBlockFilter = nullptr;
+        }
     }
 
-
-    // BUIP010 - Xtreme Thinblocks - begin section
-    if (pThinBlockFilter)
-    {
-        delete pThinBlockFilter;
-        pThinBlockFilter = nullptr;
-    }
-    mapThinBlocksInFlight.clear();
     thinBlockWaitingForTxns = -1;
     thinBlock.SetNull();
-
-    // We must set this to false on disconnect otherwise we will have trouble reconnecting -addnode nodes
-    // if the remote peer restarts.
-    fSuccessfullyConnected = false;
-    fAutoOutbound = false;
-
-    // BUIP010 - Xtreme Thinblocks - end section
-
-    // BUIPXXX - Graphene blocks - begin section
-    mapGrapheneBlocksInFlight.clear();
     grapheneBlockWaitingForTxns = -1;
     grapheneBlock.SetNull();
 
-    fSuccessfullyConnected = false;
+    // We must set this to false on disconnect otherwise we will have trouble reconnecting -addnode nodes
+    // if the remote peer restarts.
     fAutoOutbound = false;
-
-    // BUIPXXX - Graphene blocks - end section
-
 
     addrFromPort = 0;
 
     // Update addrman timestamp
-    if (nMisbehavior == 0 && fCurrentlyConnected)
+    if (nMisbehavior == 0 && successfullyConnected())
         addrman.Connected(addr);
 
     GetNodeSignals().FinalizeNode(GetId());
@@ -2938,7 +2986,7 @@ void CNode::BeginMessage(const char *pszCommand) EXCLUSIVE_LOCK_FUNCTION(cs_vSen
     ENTER_CRITICAL_SECTION(cs_vSend);
     assert(ssSend.size() == 0);
     ssSend << CMessageHeader(GetMagic(Params()), pszCommand, 0);
-    LOG(NET, "sending msg: %s ", SanitizeString(pszCommand));
+    LOG(NET, "sending msg: %s to %s\n", SanitizeString(pszCommand), GetLogName());
     currentCommand = pszCommand;
 }
 
@@ -2975,9 +3023,12 @@ void CNode::EndMessage() UNLOCK_FUNCTION(cs_vSend)
     UpdateSendStats(this, currentCommand, nSize + CMessageHeader::HEADER_SIZE, GetTimeMicros());
 
     // Set the checksum
-    uint256 hash = Hash(ssSend.begin() + CMessageHeader::HEADER_SIZE, ssSend.end());
-    unsigned int nChecksum = 0;
-    memcpy(&nChecksum, &hash, sizeof(nChecksum));
+    uint32_t nChecksum = 0; // If we can skip the checksum, we send 0 instead
+    if (!skipChecksum)
+    {
+        uint256 hash = Hash(ssSend.begin() + CMessageHeader::HEADER_SIZE, ssSend.end());
+        memcpy(&nChecksum, &hash, sizeof(nChecksum));
+    }
     assert(ssSend.size() >= CMessageHeader::CHECKSUM_OFFSET + sizeof(nChecksum));
     memcpy((char *)&ssSend[CMessageHeader::CHECKSUM_OFFSET], &nChecksum, sizeof(nChecksum));
 
@@ -2998,10 +3049,10 @@ void CNode::EndMessage() UNLOCK_FUNCTION(cs_vSend)
 
         // If the message is a priority message then move to the front of the deque
         if (strcmp(strCommand, NetMsgType::GET_XTHIN) == 0 || strcmp(strCommand, NetMsgType::XTHINBLOCK) == 0 ||
-            strcmp(strCommand, NetMsgType::THINBLOCK) == 0 || strcmp(strCommand, NetMsgType::XBLOCKTX) == 0 ||
-            strcmp(strCommand, NetMsgType::GET_XBLOCKTX) == 0 || strcmp(strCommand, NetMsgType::GET_GRAPHENE) == 0 ||
-            strcmp(strCommand, NetMsgType::GRAPHENEBLOCK) == 0 || strcmp(strCommand, NetMsgType::GRAPHENETX) == 0 ||
-            strcmp(strCommand, NetMsgType::GET_GRAPHENETX) == 0)
+            strcmp(strCommand, NetMsgType::GET_THIN) == 0 || strcmp(strCommand, NetMsgType::THINBLOCK) == 0 ||
+            strcmp(strCommand, NetMsgType::XBLOCKTX) == 0 || strcmp(strCommand, NetMsgType::GET_XBLOCKTX) == 0 ||
+            strcmp(strCommand, NetMsgType::GET_GRAPHENE) == 0 || strcmp(strCommand, NetMsgType::GRAPHENEBLOCK) == 0 ||
+            strcmp(strCommand, NetMsgType::GRAPHENETX) == 0 || strcmp(strCommand, NetMsgType::GET_GRAPHENETX) == 0)
         {
             it = vSendMsg.insert(vSendMsg.begin(), CSerializeData());
             LOG(THIN, "Send Queue: pushed %s to the front of the queue\n", strCommand);
@@ -3014,7 +3065,7 @@ void CNode::EndMessage() UNLOCK_FUNCTION(cs_vSend)
     // BU: end
 
     ssSend.GetAndClear(*it);
-    nSendSize += (*it).size();
+    nSendSize.fetch_add((*it).size());
 
     // If write queue empty, attempt "optimistic write"
     if (it == vSendMsg.begin())

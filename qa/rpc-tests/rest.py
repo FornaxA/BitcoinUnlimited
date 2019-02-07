@@ -54,9 +54,7 @@ class RESTTest (BitcoinTestFramework):
 
     def setup_network(self, split=False):
         self.nodes = start_nodes(3, self.options.tmpdir)
-        connect_nodes_bi(self.nodes,0,1)
-        connect_nodes_bi(self.nodes,1,2)
-        connect_nodes_bi(self.nodes,0,2)
+        connect_nodes_full(self.nodes)
         self.is_network_split=False
         self.sync_all()
 
@@ -304,8 +302,10 @@ class RESTTest (BitcoinTestFramework):
         # check that there are our submitted transactions in the TX memory pool
         json_string = http_get_call(url.hostname, url.port, '/rest/mempool/contents'+self.FORMAT_SEPARATOR+'json')
         json_obj = json.loads(json_string)
-        for tx in txs:
+        for i, tx in enumerate(txs):
             assert_equal(tx in json_obj, True)
+            assert_equal(json_obj[tx]['spentby'], txs[i+1:i+2])
+            assert_equal(json_obj[tx]['depends'], txs[i-1:i])
 
         # now mine the transactions
         newblockhash = self.nodes[1].generate(1)

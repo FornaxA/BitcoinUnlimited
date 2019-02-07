@@ -3,7 +3,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#include "thinblock.h"
+#include "blockrelay/thinblock.h"
 #include "net.h"
 #include "test/test_bitcoin.h"
 #include <assert.h>
@@ -14,13 +14,6 @@
 #include <vector>
 
 using namespace std;
-
-CService ipaddress3(uint32_t i, uint32_t port)
-{
-    struct in_addr s;
-    s.s_addr = i;
-    return CService(CNetAddr(s), port);
-}
 
 class TestTBD : public CThinBlockData
 {
@@ -50,7 +43,7 @@ BOOST_AUTO_TEST_CASE(test_thinblock_byte_tracking)
      * Do calcuations for single peer building a thinblock
      */
 
-    CAddress addr1(ipaddress3(0xa0b0c001, 10000));
+    CAddress addr1(ipaddress(0xa0b0c001, 10000));
     CNode dummyNode1(INVALID_SOCKET, addr1, "", true);
 
     thindata.ResetThinBlockBytes();
@@ -95,7 +88,7 @@ BOOST_AUTO_TEST_CASE(test_thinblock_byte_tracking)
      * Add a second peer and do more calcuations for building a second thinblock
      */
 
-    CAddress addr2(ipaddress3(0xa0b0c002, 10000));
+    CAddress addr2(ipaddress(0xa0b0c002, 10000));
     CNode dummyNode2(INVALID_SOCKET, addr2, "", true);
 
     thindata.AddThinBlockBytes(1000, &dummyNode2);

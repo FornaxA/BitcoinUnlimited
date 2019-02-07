@@ -31,6 +31,11 @@ successful receipt, "requester.Rejected(...)" to indicate a bad object (request 
 #include "nodestate.h"
 #include "stat.h"
 
+#include <atomic>
+
+// Max requests allowed in a 10 minute window
+static const uint8_t MAX_THINTYPE_OBJECT_REQUESTS = 40;
+
 // When should I request a tx from someone else (in microseconds). cmdline/bitcoin.conf: -txretryinterval
 extern unsigned int txReqRetryInterval;
 extern unsigned int MIN_TX_REQUEST_RETRY_INTERVAL;
@@ -60,7 +65,8 @@ public:
     bool operator<(const CNodeRequestData &rhs) const { return desirability < rhs.desirability; }
 };
 
-struct MatchCNodeRequestData // Compare a CNodeRequestData object to a node
+// Compare a CNodeRequestData object to a node
+struct MatchCNodeRequestData
 {
     CNode *node;
     MatchCNodeRequestData(CNode *n) : node(n){};
@@ -73,6 +79,7 @@ public:
     typedef std::list<CNodeRequestData> ObjectSourceList;
     CInv obj;
     bool rateLimited;
+    bool fProcessing; // object was received but is still being processed
     int64_t lastRequestTime; // In microseconds, 0 means no request
     unsigned int outstandingReqs;
     ObjectSourceList availableFrom;
@@ -81,6 +88,7 @@ public:
     CUnknownObj()
     {
         rateLimited = false;
+        fProcessing = false;
         outstandingReqs = 0;
         lastRequestTime = 0;
         priority = 0;
@@ -107,6 +115,10 @@ struct CRequestManagerNodeState
     // How many blocks are currently in flight and requested by this node.
     int nBlocksInFlight;
 
+    // Track how many thin type objects were requested for this peer
+    double nNumRequests;
+    uint64_t nLastRequest;
+
     CRequestManagerNodeState();
 };
 
@@ -119,17 +131,17 @@ protected:
 #ifdef DEBUG
     friend UniValue getstructuresizes(const UniValue &params, bool fHelp);
 #endif
+    friend class CState;
 
-    // map of transactions
+    // maps and iterators all GUARDED_BY cs_objDownloader
     typedef std::map<uint256, CUnknownObj> OdMap;
     OdMap mapTxnInfo;
     OdMap mapBlkInfo;
     std::map<uint256, std::map<NodeId, std::list<QueuedBlock>::iterator> > mapBlocksInFlight;
     std::map<NodeId, CRequestManagerNodeState> mapRequestManagerNodeState;
-    CCriticalSection cs_objDownloader; // protects mapTxnInfo, mapBlkInfo and mapBlocksInFlight
-
     OdMap::iterator sendIter;
     OdMap::iterator sendBlkIter;
+    CCriticalSection cs_objDownloader;
 
     int inFlight;
     CStatHistory<int> inFlightTxns;
@@ -140,9 +152,6 @@ protected:
 
     void cleanup(OdMap::iterator &item);
     CLeakyBucket requestPacer;
-
-    // Request a single block.
-    bool RequestBlock(CNode *pfrom, CInv obj);
 
 public:
     CRequestManager();
@@ -155,6 +164,9 @@ public:
      *  degree of disordering of blocks on disk (which make reindexing and in the future perhaps pruning
      *  harder). We'll probably want to make this a per-peer adaptive value at some point. */
     std::atomic<unsigned int> BLOCK_DOWNLOAD_WINDOW{1024};
+
+    // Request a single block.
+    bool RequestBlock(CNode *pfrom, CInv obj);
 
     // Get this object from somewhere, asynchronously.
     void AskFor(const CInv &obj, CNode *from, unsigned int priority = 0);
@@ -172,8 +184,14 @@ public:
     // of the same blocks.
     bool AlreadyAskedForBlock(const uint256 &hash);
 
-    // Indicate that we got this object, from and bytes are optional (for node performance tracking)
-    void Received(const CInv &obj, CNode *from, int bytes = 0);
+    // Update the response time for this transaction request
+    void UpdateTxnResponseTime(const CInv &obj, CNode *pfrom);
+
+    // Indicate that we are processing this object.
+    void Processing(const CInv &obj, CNode *pfrom);
+
+    // Indicate that we got this object
+    void Received(const CInv &obj, CNode *pfrom);
 
     // Indicate that we previously got this object
     void AlreadyReceived(CNode *pnode, const CInv &obj);
@@ -181,10 +199,16 @@ public:
     // Indicate that getting this object was rejected
     void Rejected(const CInv &obj, CNode *from, unsigned char reason = 0);
 
+    // request a block by its hash
+    void RequestCorruptedBlock(const uint256 &blockHash);
+
     // Resets the last request time to zero when a node disconnects and has blocks in flight.
     void ResetLastBlockRequestTime(const uint256 &hash);
 
     void SendRequests();
+
+    // Check whether the limit for thintype object requests has been exceeded
+    bool CheckForRequestDOS(CNode *pfrom, const CChainParams &chainparams);
 
     // Check whether the last unknown block a peer advertised is not yet known.
     void ProcessBlockAvailability(NodeId nodeid);
@@ -210,16 +234,25 @@ public:
     bool MapBlocksInFlightEmpty();
     void MapBlocksInFlightClear();
 
+    void MapNodestateClear()
+    {
+        LOCK(cs_objDownloader);
+        mapRequestManagerNodeState.clear();
+    }
+
     // Methods for handling mapRequestManagerNodeState which is protected.
     void GetBlocksInFlight(std::vector<uint256> &vBlocksInFlight, NodeId nodeid);
     int GetNumBlocksInFlight(NodeId nodeid);
 
-    // Remove a request manager node from the nodestate map.
-    void RemoveNodeState(NodeId nodeid)
+    // Add entry to the requestmanager nodestate map
+    void InitializeNodeState(NodeId nodeid)
     {
         LOCK(cs_objDownloader);
-        mapRequestManagerNodeState.erase(nodeid);
+        mapRequestManagerNodeState.emplace(nodeid, CRequestManagerNodeState());
     }
+
+    // Remove a request manager node from the nodestate map.
+    void RemoveNodeState(NodeId nodeid);
 
     // Check for block download timeout and disconnect node if necessary.
     void DisconnectOnDownloadTimeout(CNode *pnode, const Consensus::Params &consensusParams, int64_t nNow);

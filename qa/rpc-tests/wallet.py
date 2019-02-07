@@ -51,11 +51,9 @@ class WalletTest (BitcoinTestFramework):
     def setup_network(self, split=False):
         self.node_args = [['-usehd=0'], ['-usehd=0'], ['-usehd=0']]
         self.nodes = start_nodes(3, self.options.tmpdir, self.node_args)
-        connect_nodes_bi(self.nodes,0,1)
-        connect_nodes_bi(self.nodes,1,2)
-        connect_nodes_bi(self.nodes,0,2)
+        connect_nodes_full(self.nodes)
         self.is_network_split=False
-        self.sync_all()
+        self.sync_blocks()
 
     def run_test (self):
 
@@ -72,9 +70,9 @@ class WalletTest (BitcoinTestFramework):
         assert_equal(walletinfo['immature_balance'], 50)
         assert_equal(walletinfo['balance'], 0)
 
-        self.sync_all()
+        self.sync_blocks()
         self.nodes[1].generate(101)
-        self.sync_all()
+        self.sync_blocks()
 
         assert_equal(self.nodes[0].getbalance(), 50)
         assert_equal(self.nodes[1].getbalance(), 50)
@@ -132,8 +130,8 @@ class WalletTest (BitcoinTestFramework):
             txns_to_send.append(self.nodes[0].signrawtransaction(raw_tx))
 
         # Have node 1 (miner) send the transactions
-        self.nodes[1].sendrawtransaction(txns_to_send[0]["hex"], True)
-        self.nodes[1].sendrawtransaction(txns_to_send[1]["hex"], True)
+        self.nodes[1].enqueuerawtransaction(txns_to_send[0]["hex"])
+        self.nodes[1].enqueuerawtransaction(txns_to_send[1]["hex"], "flush")
 
         # Have node1 mine a block to confirm transactions:
         self.nodes[1].generate(1)
@@ -232,9 +230,7 @@ class WalletTest (BitcoinTestFramework):
         stop_nodes(self.nodes)
         wait_bitcoinds()
         self.nodes = start_nodes(3, self.options.tmpdir, [["-walletbroadcast=0", "-usehd=0"],["-walletbroadcast=0", "-usehd=0"],["-walletbroadcast=0", "-usehd=0"]])
-        connect_nodes_bi(self.nodes,0,1)
-        connect_nodes_bi(self.nodes,1,2)
-        connect_nodes_bi(self.nodes,0,2)
+        connect_nodes_full(self.nodes)
         self.sync_all()
 
         txIdNotBroadcasted  = self.nodes[0].sendtoaddress(self.nodes[2].getnewaddress(), 2)
@@ -259,9 +255,7 @@ class WalletTest (BitcoinTestFramework):
         wait_bitcoinds()
         self.node_args = [['-usehd=0'], ['-usehd=0'], ['-usehd=0']]
         self.nodes = start_nodes(3, self.options.tmpdir, self.node_args)
-        connect_nodes_bi(self.nodes,0,1)
-        connect_nodes_bi(self.nodes,1,2)
-        connect_nodes_bi(self.nodes,0,2)
+        connect_nodes_full(self.nodes)
         sync_blocks(self.nodes)
 
         self.nodes[0].generate(1)
@@ -472,8 +466,8 @@ if __name__ == '__main__':
 def Test():
     t = WalletTest()
     bitcoinConf = {
-        "debug": ["net", "blk", "thin", "mempool", "req", "bench", "evict"],  # "lck"
-        "blockprioritysize": 2000000  # we don't want any transactions rejected due to insufficient fees...
+        "debug": ["rpc","net", "blk", "thin", "mempool", "req", "bench", "evict"],
     }
-    # "--tmppfx=/ramdisk/test", "--srcdir=../../debug/src"
-    t.main(["--nocleanup", "--noshutdown"], bitcoinConf, None)
+
+    flags = standardFlags()
+    t.main(flags, bitcoinConf, None)

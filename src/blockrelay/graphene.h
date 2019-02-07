@@ -5,10 +5,10 @@
 #ifndef BITCOIN_GRAPHENE_H
 #define BITCOIN_GRAPHENE_H
 
+#include "blockrelay/graphene_set.h"
 #include "bloom.h"
 #include "config.h"
 #include "consensus/validation.h"
-#include "graphene_set.h"
 #include "iblt.h"
 #include "primitives/block.h"
 #include "protocol.h"
@@ -53,7 +53,7 @@ public:
     CGrapheneSet *pGrapheneSet;
 
 public:
-    CGrapheneBlock(const CBlockRef pblock, uint64_t nReceiverMemPoolTx);
+    CGrapheneBlock(const CBlockRef pblock, uint64_t nReceiverMemPoolTx, uint64_t nSenderMempoolPlusBlock);
     CGrapheneBlock() : pGrapheneSet(nullptr) {}
     ~CGrapheneBlock();
     /**
@@ -77,7 +77,7 @@ public:
         READWRITE(nBlockTxs);
         // This logic assumes a smallest transaction size of 100 bytes.  This is optimistic for realistic transactions
         // and the downside for pathological blocks is just that graphene won't work so we fall back to xthin
-        if (nBlockTxs > excessiveBlockSize / 100)
+        if (nBlockTxs > (excessiveBlockSize * maxMessageSizeMultiplier / 100))
             throw std::runtime_error("nBlockTxs exceeds threshold for excessive block txs");
         if (!pGrapheneSet)
             pGrapheneSet = new CGrapheneSet();
@@ -177,9 +177,6 @@ class CGrapheneBlockData
 private:
     /* The sum total of all bytes for graphene blocks currently in process of being reconstructed */
     std::atomic<uint64_t> nGrapheneBlockBytes{0};
-
-    CCriticalSection cs_mapGrapheneBlockTimer; // locks mapGrapheneBlockTimer
-    std::map<uint256, uint64_t> mapGrapheneBlockTimer;
 
     CCriticalSection cs_graphenestats; // locks everything below this point
 
@@ -285,9 +282,6 @@ public:
     std::string ValidationTimeToString();
     std::string ReRequestedTxToString();
 
-    bool CheckGrapheneBlockTimer(const uint256 &hash);
-    void ClearGrapheneBlockTimer(const uint256 &hash);
-
     void ClearGrapheneBlockData(CNode *pfrom);
     void ClearGrapheneBlockData(CNode *pfrom, const uint256 &hash);
     void ClearGrapheneBlockStats();
@@ -302,16 +296,12 @@ public:
 extern CGrapheneBlockData graphenedata; // Singleton class
 
 
-bool HaveGrapheneNodes();
 bool IsGrapheneBlockEnabled();
-bool CanGrapheneBlockBeDownloaded(CNode *pto);
 bool ClearLargestGrapheneBlockAndDisconnect(CNode *pfrom);
-void ClearGrapheneBlockInFlight(CNode *pfrom, const uint256 &hash);
-void AddGrapheneBlockInFlight(CNode *pfrom, const uint256 &hash);
 void SendGrapheneBlock(CBlockRef pblock, CNode *pfrom, const CInv &inv, const CMemPoolInfo &mempoolinfo);
 bool IsGrapheneBlockValid(CNode *pfrom, const CBlockHeader &header);
 bool HandleGrapheneBlockRequest(CDataStream &vRecv, CNode *pfrom, const CChainParams &chainparams);
 CMemPoolInfo GetGrapheneMempoolInfo();
-void RequestFailoverBlock(CNode *pfrom, uint256 blockHash);
+void RequestFailoverBlock(CNode *pfrom, const uint256 &blockhash);
 
 #endif // BITCOIN_GRAPHENE_H

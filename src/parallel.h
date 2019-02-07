@@ -18,6 +18,37 @@
 
 #include <boost/thread.hpp>
 
+/**
+ * Class that keeps track of number of signature operations
+ * and bytes hashed to compute signature hashes.
+ */
+class ValidationResourceTracker
+{
+private:
+    mutable CCriticalSection cs;
+    uint64_t nSigops;
+    uint64_t nSighashBytes;
+
+public:
+    ValidationResourceTracker() : nSigops(0), nSighashBytes(0) {}
+    void Update(const uint256 &txid, uint64_t nSigopsIn, uint64_t nSighashBytesIn)
+    {
+        LOCK(cs);
+        nSigops += nSigopsIn;
+        nSighashBytes += nSighashBytesIn;
+        return;
+    }
+    uint64_t GetSigOps() const
+    {
+        LOCK(cs);
+        return nSigops;
+    }
+    uint64_t GetSighashBytes() const
+    {
+        LOCK(cs);
+        return nSighashBytes;
+    }
+};
 
 /**
  * Closure representing one script verification
@@ -32,13 +63,14 @@ protected:
     const CTransaction *ptxTo;
     unsigned int nIn;
     unsigned int nFlags;
+    unsigned int maxOps;
     bool cacheStore;
     ScriptError error;
 
 public:
     unsigned char sighashType;
     CScriptCheck()
-        : resourceTracker(nullptr), amount(0), ptxTo(0), nIn(0), nFlags(0), cacheStore(false),
+        : resourceTracker(nullptr), amount(0), ptxTo(0), nIn(0), nFlags(0), maxOps(0xffffffff), cacheStore(false),
           error(SCRIPT_ERR_UNKNOWN_ERROR), sighashType(0)
     {
     }
@@ -49,9 +81,11 @@ public:
         const CTransaction &txToIn,
         unsigned int nInIn,
         unsigned int nFlagsIn,
+        unsigned int maxOpsIn,
         bool cacheIn)
         : resourceTracker(resourceTrackerIn), scriptPubKey(scriptPubKeyIn), amount(amountIn), ptxTo(&txToIn),
-          nIn(nInIn), nFlags(nFlagsIn), cacheStore(cacheIn), error(SCRIPT_ERR_UNKNOWN_ERROR), sighashType(0)
+          nIn(nInIn), nFlags(nFlagsIn), maxOps(maxOpsIn), cacheStore(cacheIn), error(SCRIPT_ERR_UNKNOWN_ERROR),
+          sighashType(0)
     {
     }
 
@@ -68,6 +102,7 @@ public:
         std::swap(cacheStore, check.cacheStore);
         std::swap(error, check.error);
         std::swap(sighashType, check.sighashType);
+        std::swap(maxOps, check.maxOps);
     }
 
     ScriptError GetScriptError() const { return error; }
@@ -81,7 +116,10 @@ private:
     std::vector<uint256> vPreviousBlock;
     // Vector of script check queues
     std::vector<CCheckQueue<CScriptCheck> *> vQueues;
+    // Number of threads
     unsigned int nThreads;
+    // All threads currently running
+    boost::thread_group threadGroup;
     // The semaphore limits the number of parallel validation threads
     CSemaphore semThreadCount;
 
@@ -111,7 +149,7 @@ public:
      *                          are created.
      * @param[in] threadGroup   The thread group threads will be created in
      */
-    CParallelValidation(int threadCount, boost::thread_group *threadGroup);
+    CParallelValidation();
 
     ~CParallelValidation();
 

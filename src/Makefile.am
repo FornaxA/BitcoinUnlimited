@@ -98,9 +98,15 @@ BITCOIN_CORE_H = \
   base58.h \
   bandb.h \
   banentry.h \
+  blockrelay/blockrelay_common.h \
+  blockrelay/compactblock.h \
+  blockrelay/graphene.h \
+  blockrelay/graphene_set.h \
+  blockrelay/thinblock.h \
   blockstorage/blockleveldb.h \
-  blockstorage/sequential_files.h \
   blockstorage/blockstorage.h \
+  blockstorage/dbabstract.h \
+  blockstorage/sequential_files.h \
   bitnodes.h \
   bloom.h \
   cashaddr.h \
@@ -129,10 +135,9 @@ BITCOIN_CORE_H = \
   dstencode.h \
   expedited.h \
   fast-cpp-csv-parser/csv.h \
+  fastfilter.h \
   forks_csv.h \
   fs.h \
-  graphene.h \
-  graphene_set.h \
   httprpc.h \
   httpserver.h \
   iblt.h \
@@ -147,6 +152,7 @@ BITCOIN_CORE_H = \
   merkleblock.h \
   miner.h \
   net.h \
+  net_processing.h \
   nodestate.h \
   leakybucket.h \
   netaddress.h \
@@ -178,10 +184,10 @@ BITCOIN_CORE_H = \
   support/cleanse.h \
   support/pagelocker.h \
   sync.h \
-  thinblock.h \
   threadsafety.h \
   timedata.h \
   torcontrol.h \
+  txadmission.h \
   txdb.h \
   txmempool.h \
   txorphanpool.h \
@@ -195,8 +201,13 @@ BITCOIN_CORE_H = \
   util.h \
   utilmoneystr.h \
   utiltime.h \
+  validation/forks.h \
+  validation/validation.h \
+  validation/verifydb.h \
   validationinterface.h \
   versionbits.h \
+  xversionmessage.h \
+  xversionkeys.h \
   wallet/crypter.h \
   wallet/db.h \
   wallet/rpcwallet.h \
@@ -214,6 +225,11 @@ obj/build.h: FORCE
 	  $(abs_top_srcdir)
 libbitcoin_util_a-clientversion.$(OBJEXT): obj/build.h
 
+xversionkeys.h: $(top_srcdir)/contrib/devtools/xversionkeys.py $(top_srcdir)/src/xversionkeys.dat
+	$(PYTHON) $(top_srcdir)/contrib/devtools/xversionkeys.py > $(abs_top_builddir)/src/xversionkeys.h < $(srcdir)/xversionkeys.dat
+
+BUILT_SOURCES= xversionkeys.h
+
 # server: shared between bitcoind and bitcoin-qt
 libbitcoin_server_a_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_INCLUDES) $(MINIUPNPC_CPPFLAGS) $(EVENT_CFLAGS) $(EVENT_PTHREADS_CFLAGS)
 libbitcoin_server_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
@@ -223,6 +239,11 @@ libbitcoin_server_a_SOURCES = \
   bandb.cpp \
   banentry.cpp \
   bitnodes.cpp \
+  blockrelay/blockrelay_common.cpp \
+  blockrelay/compactblock.cpp \
+  blockrelay/graphene.cpp \
+  blockrelay/graphene_set.cpp \
+  blockrelay/thinblock.cpp \
   blockstorage/blockleveldb.cpp \
   blockstorage/sequential_files.cpp \
   blockstorage/blockstorage.cpp \
@@ -234,7 +255,6 @@ libbitcoin_server_a_SOURCES = \
   dosman.cpp \
   expedited.cpp \
   forks_csv.cpp \
-  graphene.cpp \
   httprpc.cpp \
   httpserver.cpp \
   iblt.cpp \
@@ -244,6 +264,7 @@ libbitcoin_server_a_SOURCES = \
   merkleblock.cpp \
   miner.cpp \
   net.cpp \
+  net_processing.cpp \
   nodestate.cpp \
   noui.cpp \
   parallel.cpp \
@@ -261,10 +282,10 @@ libbitcoin_server_a_SOURCES = \
   respend/respendrelayer.cpp \
   respend/respenddetector.cpp \
   script/sigcache.cpp \
-  thinblock.cpp \
   script/ismine.cpp \
   timedata.cpp \
   torcontrol.cpp \
+  txadmission.cpp \
   txdb.cpp \
   txmempool.cpp \
   txorphanpool.cpp \
@@ -272,8 +293,12 @@ libbitcoin_server_a_SOURCES = \
   uahf_fork.cpp \
   unlimited.cpp \
   requestManager.cpp \
+  validation/forks.cpp \
+  validation/validation.cpp \
+  validation/verifydb.cpp \
   validationinterface.cpp \
   versionbits.cpp \
+  xversionmessage.cpp \
   $(BITCOIN_CORE_H)
 
 if ENABLE_ZMQ
@@ -318,6 +343,10 @@ libbitcoincash_a_SOURCES = \
   pubkey.h \
   random.cpp \
   random.h \
+  script/interpreter.cpp \
+  script/interpreter.h \
+  script/script.cpp \
+  script/script.h \
   support/pagelocker.cpp \
   support/pagelocker.h \
   support/cleanse.cpp \
@@ -381,6 +410,7 @@ libbitcoin_consensus_a_SOURCES = \
   script/script.h \
   script/script_error.cpp \
   script/script_error.h \
+  script/sighashtype.h \
   serialize.h \
   tinyformat.h \
   uint256.cpp \
@@ -443,6 +473,7 @@ libbitcoin_util_a_SOURCES = \
 
 if GLIBC_BACK_COMPAT
 libbitcoin_util_a_SOURCES += compat/glibc_compat.cpp
+AM_LDFLAGS += $(COMPAT_LDFLAGS)
 endif
 
 # cli: shared between bitcoin-cli and bitcoin-qt
@@ -598,9 +629,9 @@ CLEANFILES += wallet/*.gcda wallet/*.gcno
 CLEANFILES += wallet/test/*.gcda wallet/test/*.gcno
 CLEANFILES += zmq/*.gcda zmq/*.gcno
 
-DISTCLEANFILES = obj/build.h
+DISTCLEANFILES = obj/build.h xversionkeys.h
 
-EXTRA_DIST = leveldb $(CTAES_DIST)
+EXTRA_DIST = leveldb $(CTAES_DIST) $(srcdir)/xversionkeys.dat $(top_srcdir)/contrib/devtools/xversionkeys.py
 
 clean-local:
 	-$(MAKE) -C secp256k1 clean
